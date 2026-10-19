@@ -274,6 +274,9 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
       return fromFail(c, res);
     }
     await createSession(c, cfg, res.user, 'passkey');
+    for (const m of cfg.modules) {
+      try { await m.afterRecovery?.({ c, cfg, user: res.user, tokenId: res.tokenId }); } catch (e) { logIncident('module.afterRecovery', e); }
+    }
     return c.json({
       ok: true, redirect: cfg.path('/auth/account'), rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id),
       acceptedCredentialIds: await acceptedCredentialIds(c.env, res.user.id), name: res.user.username, displayName: res.user.name,

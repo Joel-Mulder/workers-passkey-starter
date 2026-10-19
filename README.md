@@ -78,7 +78,7 @@ Run the checks:
 npm run check
 ```
 
-That is the typecheck plus 120 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
+That is the typecheck plus 127 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
 
 ## How it works
 
@@ -330,7 +330,7 @@ This needs a paid Apple Developer account, and the callback must be https on a r
     | Build | Size |
     |---|---|
     | Core, no modules (`npm run size`) | **456 KiB / 133 KiB gzip** |
-    | Every module on (`npm run size:modules`) | **486 KiB / 141 KiB gzip** |
+    | Every module on (`npm run size:modules`) | **488 KiB / 142 KiB gzip** |
 
     Modules are separate imports, so the ones you don't list aren't bundled.
   - The free plan allows 3 MB gzip.
@@ -403,7 +403,9 @@ What you need:
 mail({ mailer, templates: { invite: (d, app) => ({ subject: `Join ${app}`, text: `…${d.link}…`, html: '…' }) } })
 ```
 
-The template names are `verify-email`, `email-change-notice`, `recovery`, `signup-pending-admin`, `account-approved` and `invite`. Their data is listed in `TemplateData` in `src/auth/modules/mail.ts`.
+The template names are `verify-email`, `email-change-notice`, `recovery`, `recovery-completed`, `signup-pending-admin`, `account-approved` and `invite`. Their data is listed in `TemplateData` in `src/auth/modules/mail.ts`.
+
+When you write your own templates, keep the defaults' rule: **text a stranger controls is never the start of a sentence**. That means display names, usernames and typed addresses. Put such text after a fixed label and in quotes (`quoted()` in `mail.ts`). A mail that can reach an address someone else typed (`verify-email`) should carry no user text at all. Otherwise a crafted name such as "Your bank says: log in at …" reads like part of your message.
 
 **Limits and logging:**
 
@@ -437,11 +439,17 @@ The template names are `verify-email`, `email-change-notice`, `recovery`, `signu
 - "Change address" needs step-up. It sends a link to the new address and a notice to the old confirmed one. The old address stays until the new one is confirmed.
 - "Send the link again" sends a fresh link to the waiting address.
 
-**Lost your passkey?** The login page links to `/auth/recover`. It asks for the address and, when it belongs to an active account, mails a recovery link (`issueRecoveryLink`).
+**Lost your passkey?** (`recoveryByEmail: true`, **off by default**). The login page links to `/auth/recover`. It asks for the address and, when it belongs to an active account, mails a recovery link.
+
+> **Trade-off:** while this is on, whoever controls the mailbox of a confirmed address controls the account. That includes someone who broke into the mailbox, or who registers a lapsed domain. A recovery link replaces every passkey. Turn it on when losing every passkey is the bigger risk for your users. Leave it off when the account matters more than a mailbox, and hand out links yourself (`auth.issueRecoveryLink`, or the admin page) after checking who is asking.
+
+When on:
 
 - The answer is the same whether or not the address is known.
-- The mail goes out after the response (`waitUntil`), so timing doesn't tell either.
-- Turn it off with `recoveryByEmail: false`.
+- The mail goes out after the response (`waitUntil`), so timing doesn't tell either. Outside Workers, without `executionCtx`, it is awaited and timing does differ.
+- At most 3 requests per address per hour, across networks, on top of the per-IP and per-recipient mail limits.
+- Once a mailed link has been used, that address gets a "your passkeys were replaced" notice. An account owner who didn't ask for it learns about it straight away.
+- "Send the link again" for a waiting address is limited to 3 per account per hour.
 
 ### Approval and admin (`admin()`)
 
@@ -451,7 +459,7 @@ The template names are `verify-email`, `email-change-notice`, `recovery`, `signu
 |---|---|
 | `'open'` (default) | Everyone, active at once |
 | `'approval'` | Everyone, but new accounts wait for an admin. Signups through an invite or signup link are approved at once |
-| `'invite-only'` | Only through an invite or signup link (`invites()`). Refused before the passkey sheet or the trip to Google/Apple |
+| `'invite-only'` | Only through an invite or signup link. Needs `invites()`; `createAuth` throws a clear error without it. Refused before the passkey sheet or the trip to Google/Apple |
 
 **States.** Waiting and rejected accounts are `status = 'suspended'` with `approval = 'pending' | 'rejected'`, so the core already refuses them everywhere. The module only explains why at sign-in ("waiting for approval", "not approved"). A waiting account gets no session after signup; the signup page shows the message instead.
 
@@ -463,13 +471,15 @@ npx wrangler d1 execute DB --remote --command "UPDATE users SET role = 'admin' W
 
 **Admin page and API** (`/auth/admin`, `/auth/api/admin/users`):
 
-- Lists accounts, waiting ones first, filterable by state and searchable.
+- Lists accounts, waiting ones first, filterable by state and searchable. The list shows users' confirmed e-mail addresses. That is deliberate: admins need them to tell accounts apart.
 - Actions: approve, reject, suspend, reactivate, sign out everywhere, recovery link.
 - Every action needs **step-up**.
 - Every action is **optimistic**: the request carries the `access_version` the admin saw. A changed account answers 409 `stale`, so two admins can't overwrite each other.
 - Every action advances `access_version` (ending the account's sessions) and writes an audit row.
 - Admins can't act on other admins or on themselves.
-- A recovery link is mailed to a confirmed address; without one it is shown to the admin to hand over.
+- **Recovery link:**
+  - With a confirmed address and `mail()` on, the link is only ever mailed to that address. It is never returned to the admin, not even when sending fails: then the answer is 503/429 "couldn't mail the link, try later".
+  - Without a confirmed address, the link is shown to the admin to hand over. **An admin who can issue such a link can take over that account.** The page asks for explicit confirmation ("You are about to take over this account"), and the audit log records who issued it (`recovery-issued`, with the admin as actor).
 
 **Mail:** admins with a confirmed address are told about each waiting signup (`notifyAdmins: false` to stop that), and the user is told when approved.
 
@@ -482,6 +492,7 @@ npx wrangler d1 execute DB --remote --command "UPDATE users SET role = 'admin' W
 - One address, valid 7 days (`inviteDays`), works once.
 - Mailed when `mail()` is on; the URL is also returned to the admin.
 - `/auth/invite/<token>` opens the signup page with the address locked. The address counts as confirmed, because the invite reached it.
+- Share the `/auth/invite/<token>` and `/auth/join/<token>` links as they are. Don't copy the signup page's address bar (`/auth/signup?invite=…`): that skips the check that shows a clear message for a used or expired token.
 
 **Signup links** (`POST /auth/api/admin/links { label, maxUses, days }`):
 
@@ -516,6 +527,9 @@ npx wrangler d1 execute DB --remote --command "UPDATE users SET role = 'admin' W
   - Invite and link quotas are consumed in the same batch as the account.
   - Admin actions require step-up and the expected `access_version`.
   - Mail logs never contain addresses or bodies outside `APP_ENV=local`.
+  - Mail templates never start a sentence with stranger-controlled text.
+  - A recovery link for a confirmed address with mail on is never returned to an admin.
+  - `recoveryByEmail` stays off unless the app owner chose it, knowing the trade-off.
 - **Don't** add mail SDKs (use `fetch`), store raw tokens, or let `/auth/recover` reveal whether an address exists.
 
 ## Routes

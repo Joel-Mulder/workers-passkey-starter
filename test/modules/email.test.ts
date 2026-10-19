@@ -162,8 +162,22 @@ describe('e-mail verification', () => {
     expect((await t.req(pathOf(linkIn(t.outbox.sent[1]!.text)), { method: 'POST' })).status).toBe(200);
   });
 
-  it('recovery by e-mail: a link for a confirmed address, the same answer for unknown ones', async () => {
+  it('resend is limited per account (3 per hour)', async () => {
     const t = moduleApp({ email: {} });
+    const res = await signupPasskey(t.req, { name: 'Rob', username: 'rob', email: 'rob@example.com' });
+    for (let i = 0; i < 3; i++) expect((await t.req('/auth/api/account/email/resend', { method: 'POST', cookie: res.cookie })).status).toBe(200);
+    expect(await (await t.req('/auth/api/account/email/resend', { method: 'POST', cookie: res.cookie })).json()).toMatchObject({ error: { code: 'rate_limited' } });
+  });
+
+  it('recovery by e-mail is off by default', async () => {
+    const t = moduleApp({ email: {} });
+    expect((await t.req('/auth/recover')).status).toBe(404);
+    expect((await t.req('/auth/api/recovery/request', json({ email: 'a@example.com' }))).status).toBe(404);
+    expect(await (await t.req('/auth/login')).text()).not.toContain('/auth/recover"');
+  });
+
+  it('recovery by e-mail (on): a link for a confirmed address, the same answer for unknown ones', async () => {
+    const t = moduleApp({ email: { recoveryByEmail: true } });
     const u = await insertUser(t.env.DB, { name: 'Lena' });
     await t.env.DB.prepare("UPDATE users SET email = 'lena@example.com', email_verified_at = 1 WHERE id = ?").bind(u.id).run();
     const known = await (await t.req('/auth/api/recovery/request', json({ email: 'LENA@example.com' }))).json();
@@ -194,5 +208,74 @@ describe('e-mail verification', () => {
     const res = await signupPasskey(req as never, { name: 'Core', username: 'core', email: 'ignored@example.com' });
     expect(res.status).toBe(200);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE username = 'core'").first('n')).toBe(1);
+  });
+});
+
+describe('recovery by e-mail: limits and the notice afterwards', () => {
+  it('at most 3 requests per address per hour, across networks; the answer never changes', async () => {
+    const t = moduleApp({ email: { recoveryByEmail: true } });
+    const u = await insertUser(t.env.DB);
+    await t.env.DB.prepare("UPDATE users SET email = 'lim@example.com', email_verified_at = 1 WHERE id = ?").bind(u.id).run();
+    const answers = [];
+    for (let i = 0; i < 5; i++) answers.push(await (await t.req('/auth/api/recovery/request', { ...json({ email: 'lim@example.com' }), ip: `198.51.100.${i}` })).json());
+    await settle();
+    expect(new Set(answers.map(a => JSON.stringify(a))).size).toBe(1);
+    expect(t.outbox.sent).toHaveLength(3);
+    expect(await count(t.env.DB, "SELECT COUNT(*) AS n FROM rate_counters WHERE key LIKE '%lim@%'")).toBe(0);
+  });
+
+  it('using a mailed recovery link tells that address; a link handed over by hand doesn’t mail anyone', async () => {
+    const t = moduleApp({ email: { recoveryByEmail: true } });
+    const u = await insertUser(t.env.DB);
+    await t.env.DB.prepare("UPDATE users SET email = 'owner@example.com', email_verified_at = 1 WHERE id = ?").bind(u.id).run();
+    await t.req('/auth/api/recovery/request', json({ email: 'owner@example.com' }));
+    await settle();
+    const token = linkIn(t.outbox.sent[0]!.text).split('/auth/recover/')[1]!;
+    const { acceptAnyRegistration } = await import('./helpers');
+    acceptAnyRegistration();
+    const opts = await (await t.req('/auth/api/recovery/options', json({ token }))).json() as { flowId: string };
+    const done = await t.req('/auth/api/recovery/verify', json({ flowId: opts.flowId, response: { id: 'new-cred', rawId: 'new-cred', type: 'public-key', response: {} } }));
+    expect(done.status).toBe(200);
+    expect(t.outbox.sent).toHaveLength(2);
+    expect(t.outbox.sent[1]).toMatchObject({ to: 'owner@example.com', subject: expect.stringContaining('passkeys were replaced') });
+    expect(t.outbox.sent[1]!.text).toContain(`Account: "${u.username}"`);
+
+    const manual = await t.auth.issueRecoveryLink(t.env, u.id);
+    if (!manual.ok) throw new Error();
+    const opts2 = await (await t.req('/auth/api/recovery/options', json({ token: manual.url.split('/auth/recover/')[1] }))).json() as { flowId: string };
+    await t.req('/auth/api/recovery/verify', json({ flowId: opts2.flowId, response: { id: 'newer-cred', rawId: 'newer-cred', type: 'public-key', response: {} } }));
+    expect(t.outbox.sent).toHaveLength(2);
+  });
+});
+
+describe('templates: stranger-controlled text is labelled and quoted', () => {
+  it('no mail starts a sentence with a name, username or typed address; verify-email carries no user text', async () => {
+    const { DEFAULT_TEMPLATES } = await import('../../src/auth/modules/mail');
+    const evil = 'Your bank says: log in at evil.example\nNow';
+    const out = [
+      DEFAULT_TEMPLATES['signup-pending-admin']({ username: 'evil', name: evil, adminLink: 'https://app/auth/admin' }, 'App'),
+      DEFAULT_TEMPLATES['email-change-notice']({ newEmail: evil }, 'App'),
+      DEFAULT_TEMPLATES.recovery({ username: evil, link: 'L' }, 'App'),
+      DEFAULT_TEMPLATES['recovery-completed']({ username: evil }, 'App'),
+    ];
+    for (const m of out) {
+      const lines = m.text.split('\n');
+      expect(lines.some(l => l.startsWith('Your bank'))).toBe(false);
+      expect(m.text).toContain('"Your bank says: log in at evil.example Now"');
+      expect(m.subject).not.toContain('Your bank');
+    }
+    expect(out[0]!.text).toContain('Name: "Your bank says');
+    const verify = DEFAULT_TEMPLATES['verify-email']({ link: 'L', change: false }, 'App');
+    expect(verify.text.startsWith('Hello,')).toBe(true);
+  });
+
+  it('the pending-signup mail to admins quotes what the stranger typed', async () => {
+    const t = moduleApp({ admin: { signupMode: 'approval' } });
+    const { makeAdmin } = await import('./helpers');
+    await makeAdmin(t.env.DB, { email: 'boss@example.com' });
+    await signupPasskey(t.req, { name: 'Click here now', username: 'clicker' });
+    const text = t.outbox.sent[0]!.text;
+    expect(text).toContain('Name: "Click here now"');
+    expect(text.split('\n').some(l => l.startsWith('Click here'))).toBe(false);
   });
 });

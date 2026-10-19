@@ -46,43 +46,54 @@ export function memoryMailer(): Mailer & { sent: MailMessage[] } {
 }
 
 // ───────────── Templates ─────────────
+// Text that a stranger controls (a display name, a username, an address someone typed) is never the start of a
+// sentence and never unlabelled: it is quoted after a fixed label, so it can't pose as part of the message. Mails
+// that can reach an address someone else typed (verify-email) carry no user text at all.
 
 export interface TemplateData {
-  'verify-email': { name: string; link: string; change: boolean };
-  'email-change-notice': { name: string; newEmail: string };
-  recovery: { name: string; username: string; link: string };
+  'verify-email': { link: string; change: boolean };
+  'email-change-notice': { newEmail: string };
+  recovery: { username: string; link: string };
+  'recovery-completed': { username: string };
   'signup-pending-admin': { username: string; name: string; adminLink: string };
-  'account-approved': { name: string; link: string };
+  'account-approved': { link: string };
   invite: { link: string; days: number };
 }
 export type TemplateName = keyof TemplateData;
 export interface RenderedMail { subject: string; text: string; html?: string }
 export type Templates = { [K in TemplateName]: (d: TemplateData[K], app: string) => RenderedMail };
 
+/** A user-controlled value for a mail: quoted, on one line, at most 100 characters. */
+export const quoted = (v: string) => `"${v.replace(/[\r\n"]+/g, ' ').slice(0, 100)}"`;
+
 export const DEFAULT_TEMPLATES: Templates = {
   'verify-email': (d, app) => ({
     subject: `Confirm your e-mail address for ${app}`,
-    text: `Hi ${d.name},\n\n${d.change ? 'You asked to use this address' : 'You added this address'} for your ${app} account. Open this link to confirm it (valid for 24 hours):\n\n${d.link}\n\nDidn't ask for this? Ignore this mail; nothing changes.\n`,
+    text: `Hello,\n\nThis address was ${d.change ? 'entered as the new address' : 'added'} for an account on ${app}. Open this link to confirm it (valid for 24 hours):\n\n${d.link}\n\nDidn't ask for this? Ignore this mail; nothing changes and the address isn't used.\n`,
   }),
   'email-change-notice': (d, app) => ({
     subject: `Your ${app} e-mail address is being changed`,
-    text: `Hi ${d.name},\n\nSomeone signed in to your ${app} account asked to change its e-mail address to ${d.newEmail}. It only changes once that address is confirmed.\n\nWasn't this you? Sign in, remove passkeys you don't recognise and choose "Sign out on all other devices".\n`,
+    text: `Hello,\n\nSomeone signed in to your ${app} account asked to change its e-mail address.\n\nNew address: ${quoted(d.newEmail)}\n\nIt only changes once that address is confirmed. Wasn't this you? Sign in, remove passkeys you don't recognise and choose "Sign out on all other devices".\n`,
   }),
   recovery: (d, app) => ({
     subject: `Recover your ${app} account`,
-    text: `Hi ${d.name},\n\nUse this link to create a new passkey for ${d.username} (valid for 15 minutes, works once). It replaces all your current passkeys and signs you out everywhere.\n\n${d.link}\n\nDidn't ask for this? Ignore this mail; nothing changes.\n`,
+    text: `Hello,\n\nUse this link to create a new passkey (valid for 15 minutes, works once). It replaces all current passkeys of the account and signs it out everywhere.\n\nAccount: ${quoted(d.username)}\n\n${d.link}\n\nDidn't ask for this? Ignore this mail; nothing changes.\n`,
+  }),
+  'recovery-completed': (d, app) => ({
+    subject: `Your ${app} passkeys were replaced`,
+    text: `Hello,\n\nA recovery link sent to this address was just used. The account now has one new passkey; all earlier passkeys and sessions were removed.\n\nAccount: ${quoted(d.username)}\n\nWasn't this you? Contact the app's admin straight away.\n`,
   }),
   'signup-pending-admin': (d, app) => ({
-    subject: `New ${app} signup waiting for approval: ${d.username}`,
-    text: `${d.name} (${d.username}) created an account and is waiting for approval.\n\nReview it: ${d.adminLink}\n`,
+    subject: `New ${app} signup waiting for approval`,
+    text: `A new account is waiting for approval.\n\nUsername: ${quoted(d.username)}\nName: ${quoted(d.name)}\n\nReview it: ${d.adminLink}\n`,
   }),
   'account-approved': (d, app) => ({
     subject: `Your ${app} account is ready`,
-    text: `Hi ${d.name},\n\nYour account has been approved. Sign in here: ${d.link}\n`,
+    text: `Hello,\n\nYour account has been approved. Sign in here: ${d.link}\n`,
   }),
   invite: (d, app) => ({
     subject: `You're invited to ${app}`,
-    text: `You've been invited to create an account on ${app}. Open this link to sign up (valid for ${d.days} days, works once):\n\n${d.link}\n`,
+    text: `Hello,\n\nYou've been invited to create an account on ${app}. Open this link to sign up (valid for ${d.days} days, works once):\n\n${d.link}\n`,
   }),
 };
 
@@ -103,7 +114,15 @@ export interface MailModule extends AuthModule {
 }
 
 export function mail(options: MailOptions): MailModule {
-  return { name: 'mail', options };
+  return {
+    name: 'mail',
+    options,
+    // A recovery link that was mailed: tell that address once it has been used.
+    async afterRecovery({ c, cfg, user, tokenId }) {
+      const r = await c.env.DB.prepare('SELECT mailed_to FROM recovery_tokens WHERE id = ?').bind(tokenId).first<{ mailed_to: string | null }>();
+      if (r?.mailed_to) await sendMail(c, cfg, r.mailed_to, 'recovery-completed', { username: user.username });
+    },
+  };
 }
 
 export type SendResult = 'sent' | 'no-mail-module' | 'limited' | 'failed';
@@ -129,3 +148,10 @@ export async function sendMail<K extends TemplateName>(c: AuthContext, cfg: Auth
 }
 
 export const hasMail = (cfg: AuthConfig) => cfg.modules.some(m => m.name === 'mail');
+
+/** Mail a recovery link and remember the address on the link (for the notice after it is used). */
+export async function mailRecoveryLink(c: AuthContext, cfg: AuthConfig, to: string, link: { id: string; url: string }, username: string): Promise<SendResult> {
+  const sent = await sendMail(c, cfg, to, 'recovery', { username, link: link.url });
+  if (sent === 'sent') await c.env.DB.prepare('UPDATE recovery_tokens SET mailed_to = ? WHERE id = ?').bind(to, link.id).run();
+  return sent;
+}

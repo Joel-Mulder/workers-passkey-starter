@@ -64,6 +64,8 @@ export interface AuthModule {
   register?(r: RegisterContext): Promise<RegisterPart | void>;
   /** After the batch committed (new accounts only, not idempotent retries). Must not throw. */
   afterRegister?(r: RegisterContext & { user: UserRow }): Promise<void>;
+  /** After a recovery link was used (the new passkey is in place). Must not throw. */
+  afterRecovery?(x: { c: AuthContext; cfg: AuthConfig; user: UserRow; tokenId: string }): Promise<void>;
   /** Turn a UNIQUE/constraint error of the registration batch into a Fail (e.g. an e-mail address taken meanwhile). */
   mapError?(message: string): Fail | null;
   /** Why a blocked user can't sign in (e.g. waiting for approval). null = not this module's business. */

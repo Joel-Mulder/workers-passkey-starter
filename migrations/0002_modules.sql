@@ -24,6 +24,9 @@ CREATE TABLE email_verifications (
 );
 CREATE INDEX email_verifications_user ON email_verifications (user_id);
 
+-- Recovery links that were mailed remember the address, so it is told once the link has been used.
+ALTER TABLE recovery_tokens ADD COLUMN mailed_to TEXT;
+
 -- Personal invites: one address, single use, 7 days by default.
 CREATE TABLE invites (
   id TEXT PRIMARY KEY,

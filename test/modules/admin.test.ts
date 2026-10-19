@@ -17,7 +17,8 @@ describe('signup modes', () => {
     expect(res.json).toMatchObject({ ok: true, pending: true, code: 'account_pending', message: expect.stringContaining('waiting for approval') });
     expect(res.cookie).toBeUndefined();
     expect(await user(t.env.DB, 'wanda')).toMatchObject({ status: 'suspended', approval: 'pending' });
-    expect(t.outbox.sent).toEqual([expect.objectContaining({ to: 'boss@example.com', subject: expect.stringContaining('wanda') })]);
+    expect(t.outbox.sent).toEqual([expect.objectContaining({ to: 'boss@example.com', subject: expect.stringContaining('waiting for approval') })]);
+    expect(t.outbox.sent[0]!.text).toContain('Username: "wanda"');
     expect(linkIn(t.outbox.sent[0]!.text)).toContain('/auth/admin');
 
     // Signing in with the new passkey is refused with the reason.
@@ -45,8 +46,14 @@ describe('signup modes', () => {
     expect(await user(t.env.DB, 'wim')).toMatchObject({ approval: 'pending' });
   });
 
+  it('invite-only needs invites(): a clear error at startup', async () => {
+    const { createAuth } = await import('../../src/auth');
+    const { admin } = await import('../../src/auth/modules');
+    expect(() => createAuth({ appName: 'X', modules: [admin({ signupMode: 'invite-only' })] })).toThrow(/needs the invites\(\) module/);
+  });
+
   it('invite-only: no signup without an invite or link (passkey and Google)', async () => {
-    const t = moduleApp({ admin: { signupMode: 'invite-only' } });
+    const t = moduleApp({ admin: { signupMode: 'invite-only' }, invites: true });
     Object.assign(t.env, { GOOGLE_CLIENT_ID: 'g', GOOGLE_CLIENT_SECRET: 's' });
     expect((await signupPasskey(t.req, { name: 'Ivan', username: 'ivan' })).json).toMatchObject({ error: { code: 'signup_invite_only' } });
     expect((await t.req('/auth/google/start?intent=signup')).status).toBe(403);
@@ -137,12 +144,29 @@ describe('admin actions', () => {
     expect(await (await act(t, cookie, boss.id, 'suspend', await version(t.env.DB, boss.id))).json()).toMatchObject({ error: { code: 'protected_account' } });
   });
 
-  it('recovery link: mailed to a confirmed address, otherwise returned to the admin', async () => {
+  it('recovery link: mailed to a confirmed address and never shown to the admin (not even when mailing fails)', async () => {
     const { t, cookie } = await world('open');
     const withMail = await insertUser(t.env.DB);
     await t.env.DB.prepare("UPDATE users SET email = 'm@example.com', email_verified_at = 1 WHERE id = ?").bind(withMail.id).run();
     expect(await (await act(t, cookie, withMail.id, 'recovery-link', await version(t.env.DB, withMail.id))).json()).toEqual({ ok: true, mailed: true });
     expect(t.outbox.sent.at(-1)).toMatchObject({ to: 'm@example.com', subject: expect.stringContaining('Recover') });
+    expect(await t.env.DB.prepare('SELECT mailed_to FROM recovery_tokens WHERE user_id = ? AND used_at IS NULL').bind(withMail.id).first('mailed_to')).toBe('m@example.com');
+    // The per-recipient mail limit (5/hour) is reached: 429, no URL.
+    for (let i = 0; i < 4; i++) await act(t, cookie, withMail.id, 'recovery-link', await version(t.env.DB, withMail.id));
+    const limited = await act(t, cookie, withMail.id, 'recovery-link', await version(t.env.DB, withMail.id));
+    expect(limited.status).toBe(429);
+    expect(JSON.stringify(await limited.json())).not.toContain('/auth/recover/');
+    // The mailer fails: 503, no URL.
+    const broken = await insertUser(t.env.DB);
+    await t.env.DB.prepare("UPDATE users SET email = 'b@example.com', email_verified_at = 1 WHERE id = ?").bind(broken.id).run();
+    vi.spyOn(t.outbox, 'send').mockRejectedValue(new Error('down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failed = await act(t, cookie, broken.id, 'recovery-link', await version(t.env.DB, broken.id));
+    expect(failed.status).toBe(503);
+    expect(JSON.stringify(await failed.json())).not.toContain('/auth/recover/');
+    vi.restoreAllMocks();
+    // The admin page warns before taking over.
+    expect(await (await t.req('/auth/admin', { cookie })).text()).toContain('You are about to take over this account');
     const noMail = await insertUser(t.env.DB);
     expect(await (await act(t, cookie, noMail.id, 'recovery-link', await version(t.env.DB, noMail.id))).json()).toEqual({ ok: true, mailed: false, url: expect.stringMatching(/\/auth\/recover\/[A-Za-z0-9_-]{43}$/) });
   });

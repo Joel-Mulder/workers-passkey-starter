@@ -18,7 +18,7 @@ import { issueRecoveryLink } from '../recovery';
 import { loginPath, requireFreshAuth, wantsJson } from '../session';
 import { auditStmts, fail, type Result } from '../users';
 import type { AuthContext, AuthEnv } from '../types';
-import { hasMail, sendMail } from './mail';
+import { hasMail, mailRecoveryLink, sendMail } from './mail';
 
 export type SignupMode = 'open' | 'approval' | 'invite-only';
 
@@ -38,6 +38,9 @@ export const MSG = {
   protected: 'Admins (and your own account) can’t be changed here. Change admins in the database.',
   notFound: 'This account doesn’t exist (any more).',
   version: 'Reload the page and try again.',
+  mailFailed: 'Couldn’t mail the recovery link. Try again later.',
+  mailLimited: 'Several mails already went to this address. Try again in an hour.',
+  inviteOnlyNeedsInvites: "admin({ signupMode: 'invite-only' }) needs the invites() module in AuthOptions.modules (otherwise nobody can sign up)",
 };
 
 /** Signed in AND role 'admin' (read from the database on every request, so a demoted admin loses access at once). */
@@ -105,8 +108,14 @@ export async function adminAction(
     if (t.access_version !== expectedVersion) return fail(409, 'stale', MSG.stale);
     const link = await issueRecoveryLink(c.env, cfg, t.id, { actorId }, at);
     if (!link.ok) return link;
-    // Mail it to the confirmed address when there is one; otherwise the admin hands the link over.
-    if (t.email && hasMail(cfg) && (await sendMail(c, cfg, t.email, 'recovery', { name: t.name, username: t.username, link: link.url })) === 'sent') return { ok: true, mailed: true };
+    // A confirmed address with mail on: the link only ever goes there, never to the admin (not even when sending
+    // fails). Without one, the admin hands the link over, which means the admin can take over this account: the
+    // audit log records who issued it.
+    if (t.email && hasMail(cfg)) {
+      const sent = await mailRecoveryLink(c, cfg, t.email, link, t.username);
+      if (sent === 'sent') return { ok: true, mailed: true };
+      return sent === 'limited' ? fail(429, 'mail_limited', MSG.mailLimited) : fail(503, 'mail_failed', MSG.mailFailed);
+    }
     return { ok: true, mailed: false, url: link.url };
   }
 
@@ -126,7 +135,7 @@ export async function adminAction(
     db.prepare('DELETE FROM sessions WHERE user_id = ?1 AND access_version != (SELECT access_version FROM users WHERE id = ?1)').bind(t.id),
   ]);
   if (res[0]?.meta.changes !== 1) return t.access_version !== expectedVersion ? fail(409, 'stale', MSG.stale) : fail(409, 'not_applicable', MSG.notApplicable);
-  if (action === 'approve' && t.email) await sendMail(c, cfg, t.email, 'account-approved', { name: t.name, link: `${c.env.APP_ORIGIN}${cfg.path('/auth/login')}` });
+  if (action === 'approve' && t.email) await sendMail(c, cfg, t.email, 'account-approved', { link: `${c.env.APP_ORIGIN}${cfg.path('/auth/login')}` });
   const after = await db.prepare('SELECT status, approval FROM users WHERE id = ?').bind(t.id).first<{ status: string; approval: string }>();
   return { ok: true, state: stateOf(after!) };
 }
@@ -135,7 +144,11 @@ function adminPage(c: AuthContext, cfg: AuthConfig, users: AdminUserView[], extr
   const actionsFor = (u: AdminUserView): AdminAction[] =>
     u.role === 'admin' ? [] : u.state === 'pending' ? ['approve', 'reject'] : u.state === 'rejected' ? ['approve'] : u.state === 'suspended' ? ['reactivate'] : ['suspend', 'sign-out', 'recovery-link'];
   const label: Record<AdminAction, string> = { approve: 'Approve', reject: 'Reject', suspend: 'Suspend', reactivate: 'Reactivate', 'sign-out': 'Sign out everywhere', 'recovery-link': 'Recovery link' };
-  const confirmText: Partial<Record<AdminAction, string>> = { reject: 'Reject this signup?', suspend: 'Suspend this account? It is signed out everywhere.', 'recovery-link': 'Create a recovery link? Whoever opens it takes over the account.' };
+  const confirmText: Partial<Record<AdminAction, string>> = {
+    reject: 'Reject this signup?',
+    suspend: 'Suspend this account? It is signed out everywhere.',
+    'recovery-link': 'You are about to take over this account: the recovery link replaces all its passkeys and signs it out everywhere. With a confirmed address it is mailed there; without one it is shown to you. Continue?',
+  };
   const body = html`<h1>Admin</h1>
 <section data-admin>
   <p class="auth-status" data-auth-status role="status" aria-live="polite"></p>
@@ -193,6 +206,7 @@ export function admin(options: AdminOptions = {}): AuthModule {
     },
 
     routes(r: Hono<AuthEnv>, cfg: AuthConfig) {
+      if (mode === 'invite-only' && !cfg.modules.some(m => m.name === 'invites')) throw new Error(MSG.inviteOnlyNeedsInvites);
       const isAdmin = requireAdmin(cfg);
       const fresh = requireFreshAuth(cfg);
       const states = ['all', 'pending', 'active', 'suspended', 'rejected'] as const;

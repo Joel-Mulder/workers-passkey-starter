@@ -33,18 +33,19 @@ export const MSG = {
  * after you have verified that the person asking really owns the account: the link takes over the account.
  */
 export async function issueRecoveryLink(env: Env, cfg: Pick<AuthConfig, 'audit' | 'path'>, userId: string, o: { ttlMs?: number; actorId?: string | null } = {}, at = Date.now()):
-  Promise<Result<{ url: string; expiresAt: number }>> {
+  Promise<Result<{ id: string; url: string; expiresAt: number }>> {
   const user = await getUser(env.DB, userId);
   if (!user || isBlocked(user.status)) return fail(409, 'recovery_not_allowed', MSG.notAllowed);
   const token = randomToken(32);
+  const id = uuid();
   const expiresAt = at + (o.ttlMs ?? RECOVERY_TTL);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM recovery_tokens WHERE user_id = ? AND used_at IS NULL').bind(userId),
     env.DB.prepare('INSERT INTO recovery_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(uuid(), userId, await sha256Hex(token), expiresAt, at),
+      .bind(id, userId, await sha256Hex(token), expiresAt, at),
     ...auditStmts(env.DB, cfg, { actorId: o.actorId ?? null, action: 'recovery-issued', targetUserId: userId }, at),
   ]);
-  return { ok: true, url: `${env.APP_ORIGIN}${cfg.path(`/auth/recover/${token}`)}`, expiresAt };
+  return { ok: true, id, url: `${env.APP_ORIGIN}${cfg.path(`/auth/recover/${token}`)}`, expiresAt };
 }
 
 interface TokenRow { id: string; user_id: string; expires_at: number; used_at: number | null }
@@ -70,7 +71,7 @@ export async function startRecovery(env: Env, cfg: Pick<AuthConfig, 'appName' | 
   return { ok: true, flowId, options };
 }
 
-export async function finishRecovery(env: Env, cfg: Pick<AuthConfig, 'audit'>, flowId: unknown, response: unknown, at = Date.now()): Promise<Result<{ user: UserRow }>> {
+export async function finishRecovery(env: Env, cfg: Pick<AuthConfig, 'audit'>, flowId: unknown, response: unknown, at = Date.now()): Promise<Result<{ user: UserRow; tokenId: string }>> {
   const db = env.DB;
   const flow = await takeFlow<RecoveryFlow>(db, flowId, 'recovery', at);
   if (!flow || !flow.userId) return fail(400, 'flow_expired', MSG.expired);
@@ -105,5 +106,5 @@ export async function finishRecovery(env: Env, cfg: Pick<AuthConfig, 'audit'>, f
     const u = await getUser(db, userId);
     return u && isBlocked(u.status) ? blockedFail(u.id) : fail(400, 'recovery_invalid', MSG.invalid);
   }
-  return { ok: true, user: (await getUser(db, userId))! };
+  return { ok: true, user: (await getUser(db, userId))!, tokenId: flow.data.tokenId };
 }

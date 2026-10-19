@@ -129,7 +129,7 @@ describe('Google / Apple routes', () => {
     expect(start.status).toBe(302);
     const raw = setCookieOf(start, 'auth_oauth')!;
     expect(raw).toMatch(/HttpOnly/);
-    expect(raw).toMatch(/Path=\/auth/);
+    expect(raw).toMatch(/Path=\/;/);
     expect(raw).toMatch(/SameSite=Lax/); // local; None + Secure when deployed (Apple form_post)
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     // Same state without the binding cookie (a link sent to someone else): refused.
@@ -148,7 +148,7 @@ describe('Google / Apple routes', () => {
 
   it('deployed: the binding cookie is SameSite=None; Secure so Apple’s form_post carries it', async () => {
     const res = await client(worker.fetch, googleEnv({ APP_ENV: 'production' }))('/auth/google/start');
-    const raw = setCookieOf(res, '__Secure-auth_oauth')!; // prefixed when deployed (path /auth)
+    const raw = setCookieOf(res, '__Host-auth_oauth')!; // prefixed when deployed
     expect(raw).toMatch(/SameSite=None/);
     expect(raw).toMatch(/Secure/);
   });

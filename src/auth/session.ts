@@ -44,12 +44,12 @@ export async function resolveSession(db: D1Database, cfg: AuthConfig, token: str
 export const secureCookies = (c: AuthContext) => c.env.APP_ENV !== 'local';
 
 /**
- * Cookie name with a browser-enforced prefix when deployed: `__Host-` for Path=/ (no Domain attribute allowed, so a
- * sibling subdomain can't plant or overwrite it), `__Secure-` otherwise. Local dev over http keeps the plain name.
+ * Cookie name with the `__Host-` prefix when deployed: the browser then requires Secure and Path=/ and rejects any
+ * Domain attribute, so a sibling subdomain can't plant or overwrite it. That is why every auth cookie uses Path=/,
+ * even under a basePath (`__Secure-` alone would still accept Domain=). Local dev over http keeps the plain name.
  */
-export const cookieName = (c: AuthContext, base: string, path: string) =>
-  secureCookies(c) ? (path === '/' ? '__Host-' : '__Secure-') + base : base;
-const sessionCookieName = (c: AuthContext, cfg: AuthConfig) => cookieName(c, cfg.cookies.session, cfg.cookies.path);
+export const cookieName = (c: AuthContext, base: string) => secureCookies(c) ? `__Host-${base}` : base;
+const sessionCookieName = (c: AuthContext, cfg: AuthConfig) => cookieName(c, cfg.cookies.session);
 
 const sessionCookie = (c: AuthContext, cfg: AuthConfig, maxAgeMs: number) =>
   ({ httpOnly: true, sameSite: 'Lax' as const, path: cfg.cookies.path, secure: secureCookies(c), maxAge: Math.max(0, Math.floor(maxAgeMs / 1000)) });

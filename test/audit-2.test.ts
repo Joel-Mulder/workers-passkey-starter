@@ -38,7 +38,7 @@ describe('CSRF', () => {
 });
 
 describe('cookies', () => {
-  it('deployed cookies carry __Host- (path /) or __Secure- (sub-path) prefixes; local dev keeps plain names', async () => {
+  it('deployed cookies carry the __Host- prefix; local dev keeps plain names', async () => {
     mockRegistration('cred-p');
     const env = makeEnv({ APP_ENV: 'production' });
     const req = client(worker.fetch, env);
@@ -52,7 +52,20 @@ describe('cookies', () => {
     const pair = raw.split(';')[0];
     expect((await req('/auth/api/sign-out-everywhere', { method: 'POST', cookie: pair })).status).not.toBe(401);
   });
+  it('under a basePath, deployed cookies are still Path=/ and __Host- (a __Secure- cookie would accept Domain=)', async () => {
+    const auth = createAuth({ appName: 'Sub', basePath: '/app', cookiePrefix: 'sub' });
+    const a = new Hono<AuthEnv>();
+    a.use('*', auth.session);
+    a.route('/app', auth.routes);
+    const env = makeEnv({ APP_ENV: 'production', GOOGLE_CLIENT_ID: 'g', GOOGLE_CLIENT_SECRET: 's' });
+    const res = await client((r, e) => a.fetch(r, e), env)('/app/auth/google/start');
+    const raw = setCookieOf(res, '__Host-sub_oauth')!;
+    expect(raw).toMatch(/Path=\/;/);
+    expect(raw).toMatch(/Secure/);
+    expect(raw).not.toMatch(/Domain=/i);
+  });
 });
+
 
 describe('sessions', () => {
   it('end maxSessionAgeMs after sign-in however often they slide, and renewal never passes that point', async () => {

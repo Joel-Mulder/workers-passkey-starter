@@ -54,9 +54,9 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
    * The OAuth binding cookie. Apple answers with a cross-site form post, which only carries SameSite=None cookies,
    * so it is None (+ Secure) when deployed; local dev over http uses Lax (Apple can't redirect to http anyway).
    */
-  const oauthName = (c: C) => cookieName(c, cfg.cookies.oauth, cfg.path('/auth'));
-  const signupName = (c: C) => cookieName(c, cfg.cookies.signup, cfg.cookies.path);
-  const oauthCookie = (c: C) => ({ path: cfg.path('/auth'), secure: secureCookies(c), httpOnly: true, sameSite: (secureCookies(c) ? 'None' : 'Lax') as 'None' | 'Lax' });
+  const oauthName = (c: C) => cookieName(c, cfg.cookies.oauth);
+  const signupName = (c: C) => cookieName(c, cfg.cookies.signup);
+  const oauthCookie = (c: C) => ({ path: cfg.cookies.path, secure: secureCookies(c), httpOnly: true, sameSite: (secureCookies(c) ? 'None' : 'Lax') as 'None' | 'Lax' });
 
   /** null = allowed, else the message to show. */
   async function signupRefusal(req: SignupRequest): Promise<string | null> {

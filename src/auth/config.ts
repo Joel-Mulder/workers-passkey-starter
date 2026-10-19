@@ -44,7 +44,7 @@ export function resolveConfig(o: AuthOptions): AuthConfig {
     modules,
     appName: o.appName,
     basePath,
-    cookies: { session: `${prefix}_session`, oauth: `${prefix}_oauth`, signup: `${prefix}_signup`, path: basePath || '/' },
+    cookies: { session: `${prefix}_session`, oauth: `${prefix}_oauth`, signup: `${prefix}_signup`, path: '/' }, // always '/', so deployed names get __Host- (see cookieName)
     afterSignInPath: path(o.afterSignInPath ?? '/'),
     sessionTtlMs: o.sessionTtlMs ?? 30 * DAY,
     renewAfterMs: o.renewAfterMs ?? DAY,

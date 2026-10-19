@@ -78,7 +78,7 @@ Run the checks:
 npm run check
 ```
 
-That is the typecheck plus 137 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
+That is the typecheck plus 138 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
 
 ## How it works
 
@@ -146,7 +146,7 @@ The account is created at verify, in one atomic D1 batch: user, passkey and audi
 - The `state` doubles as the `auth_flows` id, and a nonce is added.
 - **Google:** PKCE, scopes `openid email profile`, `prompt=select_account`.
 - **Apple:** scopes `name email`, `response_mode=form_post`. Apple has no PKCE.
-- A binding cookie (`auth_oauth`: HttpOnly, 10 minutes, `SameSite=None; Secure` when deployed) ties the flow to this browser. Its SHA-256 is stored in the flow.
+- A binding cookie (`auth_oauth`, `__Host-auth_oauth` when deployed: HttpOnly, 10 minutes, `SameSite=None; Secure` when deployed) ties the flow to this browser. Its SHA-256 is stored in the flow.
 
 **Callback.**
 
@@ -176,7 +176,7 @@ Apple's cross-site POST arrives without the `SameSite=Lax` session cookie. `link
   - HttpOnly, `SameSite=Lax`, Secure when deployed;
   - D1 stores only `SHA-256(token)`;
   - lasts 30 days and slides (renewed at most once a day), but never longer than 90 days after sign-in (`maxSessionAgeMs`);
-  - named `__Host-auth_session` when deployed at `/` (`__Secure-` under a base path), so a sibling subdomain can't plant or overwrite it; the OAuth and signup cookies get the same prefix;
+  - always `Path=/` and named `__Host-auth_session` when deployed (also under a `basePath`), so a sibling subdomain can't plant or overwrite it; the OAuth and signup cookies work the same way. Two apps on one host need different `cookiePrefix` values;
   - revoked instantly through `users.access_version` (`revokeAllSessions`, sign out everywhere, credential removal).
 - **CSRF:** every write must carry `Origin: APP_ORIGIN`. This, together with SameSite=Lax, replaces CSRF tokens. Only Apple's callback is exempt. `auth.routes` enforces it itself; JSON endpoints also require `Content-Type: application/json`.
 - **Caching:** every `/auth/api/*` response carries `Cache-Control: no-store`.
@@ -278,7 +278,7 @@ createAuth({
 |---|---|---|
 | `appName` | required | Shown in the passkey sheet (RP name) and page titles |
 | `basePath` | `''` | Where `auth.routes` is mounted |
-| `cookiePrefix` | `auth` | Cookie names: `auth_session`, `auth_oauth`, `auth_signup` (with a `__Host-`/`__Secure-` prefix when deployed) |
+| `cookiePrefix` | `auth` | Cookie names: `auth_session`, `auth_oauth`, `auth_signup` (with a `__Host-` prefix when deployed; all `Path=/`) |
 | `afterSignInPath` | `/` | Target after sign-in without `returnTo` |
 | `sessionTtlMs` / `renewAfterMs` | 30 days / 1 day | Sliding sessions |
 | `maxSessionAgeMs` | 90 days | Absolute session lifetime; then the user signs in again |

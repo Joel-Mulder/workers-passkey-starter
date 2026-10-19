@@ -188,7 +188,7 @@ describe('createAuth options', () => {
     const opts = await (await req('/app/auth/api/passkey/login/options', json({}))).json() as { flowId: string };
     const res = await req('/app/auth/api/passkey/login/verify', json({ flowId: opts.flowId, response: credentialResponse(pk.credentialId) }));
     expect(await res.json()).toMatchObject({ redirect: '/app/' });
-    expect(setCookieOf(res, 'sub_session')).toMatch(/Path=\/app/);
+    expect(setCookieOf(res, 'sub_session')).toMatch(/Path=\/;/); // always /, so deployed it can be __Host-
     // The Apple callback under the base path is exempt from the origin check (it fails on state instead).
     const apple = await req('/app/auth/apple/callback', { method: 'POST', origin: 'https://appleid.apple.com', body: new URLSearchParams({ state: 'x'.repeat(20), code: 'c' }) });
     expect(apple.status).toBe(400);

@@ -14,7 +14,49 @@ The code is extracted from a production app. Project-specific parts were removed
 
 MIT licensed (see [LICENSE](LICENSE)).
 
-Contents: [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Account deletion and recovery](#account-deletion-and-recovery) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
+## At a glance
+
+```mermaid
+flowchart LR
+  U([User]) --> B["Browser<br/>public/auth/passkey.js (no SDK)"]
+  B -->|passkey| PK
+  B -->|Sign in with Google / Apple| OA
+  subgraph W["Cloudflare Worker · Hono"]
+    PK["@simplewebauthn/server<br/>challenge + signature check"]
+    OA["arctic<br/>OAuth redirect, state, PKCE, code exchange"]
+    JO["jose<br/>verify ID token (iss, aud, nonce)"]
+    SE["Sessions + guards<br/>cookie, origin check, rate limits"]
+    OA --> JO
+    PK --> SE
+    JO --> SE
+  end
+  OA <-->|redirect + callback| IDP[("Google / Apple")]
+  JO -. JWKS public keys .-> IDP
+  PK <--> D1[("D1<br/>auth_flows · passkeys · oauth_identities<br/>sessions · rate_counters · recovery_tokens")]
+  SE <--> D1
+  SE -->|HttpOnly session cookie| B
+```
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant W as Worker
+  participant D as D1
+  B->>W: POST /auth/api/passkey/login/options
+  W->>D: store challenge (single use, short TTL)
+  W-->>B: options + challenge
+  B->>B: Face ID / Touch ID, device signs the challenge
+  B->>W: POST /auth/api/passkey/login/verify
+  W->>D: take challenge, load public key
+  W->>W: verify signature, origin and RP ID (Web Crypto)
+  W->>D: bump counter, create session
+  W-->>B: Set-Cookie (HttpOnly)
+```
+
+An editable version of the architecture chart is in [docs/architecture.drawio](docs/architecture.drawio) (opens in diagrams.net; Lucidchart: File → Import → draw.io).
+
+Contents: [At a glance](#at-a-glance) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Account deletion and recovery](#account-deletion-and-recovery) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
 
 ## Quick start
 

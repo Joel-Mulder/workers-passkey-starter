@@ -1,6 +1,7 @@
 // Public types: the Worker bindings the auth code reads, the session it puts on the context, and the options of
 // createAuth(). Your app's Hono env must include these (see README.md, "Integrate into an existing app").
 import type { Context } from 'hono';
+import type { AuthModule } from './extensions';
 
 export interface AuthBindings {
   DB: D1Database;
@@ -80,6 +81,8 @@ export interface PageInput {
 }
 
 export interface AuthOptions {
+  /** Optional modules (mail, e-mail verification, approval + admin, invites). Off unless listed; see README "Modules". */
+  modules?: AuthModule[];
   /** Shown in the browser's passkey sheet (WebAuthn RP name) and in page titles. */
   appName: string;
   /** Where the auth routes are mounted, e.g. '' (default) or '/app'. Must match app.route(basePath, auth.routes). */

@@ -204,7 +204,7 @@ export async function finishLogin(env: Env, flowId: unknown, response: unknown, 
   if (!pk) return unknownCredential(env, response.id, response);
   const user = await getUser(env.DB, pk.user_id);
   if (!user) return unknownCredential(env, response.id, response);
-  if (isBlocked(user.status)) return blockedFail();
+  if (isBlocked(user.status)) return blockedFail(user.id);
   const v = await verifyAssertion(env, pk, response as unknown as AuthenticationResponseJSON, flow.data.challenge);
   if (!v) return fail(400, 'passkey_invalid', MSG.invalid);
   await counterUpdateStmt(env.DB, pk.id, v, at).run();

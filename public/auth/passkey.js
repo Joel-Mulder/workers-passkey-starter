@@ -123,7 +123,12 @@ export function errorMessage(err) {
 
 /** POST JSON to an auth API path (e.g. '/passkey/login/options'). Throws { status, code, apiMessage, data } on errors. */
 export async function postJson(path, body) {
-  const res = await fetch(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body ?? {}), credentials: 'same-origin' });
+  return postTo(api(path), body);
+}
+
+/** POST JSON to an absolute same-origin path. */
+export async function postTo(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body ?? {}), credentials: 'same-origin' });
   const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data?.error?.code || `http_${res.status}`), { status: res.status, code: data?.error?.code, apiMessage: data?.error?.message, data });
   return data;
@@ -170,9 +175,12 @@ export async function signInWithPasskey({ returnTo, prepared, signal } = {}) {
   }
 }
 
-/** Create an account: { name, username } → passkey → session. Resolves { redirect, … }. */
-export async function signUpWithPasskey({ name, username }) {
-  const { flowId, options } = await postJson('/signup/options', { name, username });
+/**
+ * Create an account: { name, username, ...module fields such as email or an invite token } → passkey → session.
+ * Resolves { redirect, … }, or { pending: true, message } when the account waits for approval (no session yet).
+ */
+export async function signUpWithPasskey({ name, username, ...extra }) {
+  const { flowId, options } = await postJson('/signup/options', { ...extra, name, username });
   const response = await createPasskey(options);
   const out = await postJson('/signup/verify', { flowId, response });
   await signalDetails(out.rpId, out.userId, out.name, out.displayName);
@@ -346,6 +354,7 @@ function initSignup(form) {
   const finish = async (flowId, response) => {
     const out = await postJson('/signup/verify', { flowId, response });
     await signalDetails(out.rpId, out.userId, out.name, out.displayName);
+    if (out.pending) { form.replaceWith(Object.assign(document.createElement('p'), { className: 'auth-status', textContent: out.message })); return; }
     location.assign(out.redirect);
   };
   form.addEventListener('submit', async e => {
@@ -360,8 +369,10 @@ function initSignup(form) {
         await finish(p.flowId, await createPasskey(p.options));
         return;
       }
-      const fd = new FormData(form);
-      const { flowId, options } = await postJson('/signup/options', { name: String(fd.get('name') ?? '').trim(), username: String(fd.get('username') ?? '').trim().toLowerCase() });
+      // Every field of the form: name and username, plus what modules add (email, an invite or signup-link token).
+      const body = Object.fromEntries([...new FormData(form)].filter(([, v]) => typeof v === 'string').map(([k, v]) => [k, v.trim()]));
+      body.username = (body.username ?? '').toLowerCase();
+      const { flowId, options } = await postJson('/signup/options', body);
       const t0 = Date.now();
       let response;
       try {
@@ -378,7 +389,7 @@ function initSignup(form) {
       await finish(flowId, response);
     } catch (err) {
       say(form, errorMessage(err));
-      const field = { invalid_name: 'name', invalid_username: 'username', username_taken: 'username' }[err?.code];
+      const field = { invalid_name: 'name', invalid_username: 'username', username_taken: 'username', invalid_email: 'email', email_taken: 'email', invite_email_mismatch: 'email' }[err?.code];
       if (field) form.elements.namedItem(field)?.focus();
     } finally {
       busy(button, false);
@@ -471,12 +482,41 @@ function initRecover(button) {
   });
 }
 
+// Module pages: <form data-auth-api="/auth/api/…"> and <button data-auth-api="…" data-body='{"…"}'> post JSON (with
+// step-up when the server asks for it). data-confirm asks first; data-reload reloads after success; otherwise the
+// nearest [data-auth-status] shows data-done or the server's message.
+function initApi(el) {
+  const root = el.closest('[data-account], [data-admin], form, section') ?? document.body;
+  const statusEl = () => el.querySelector?.('[data-auth-status]') ?? root.querySelector('[data-auth-status]') ?? document.querySelector('[data-auth-status]');
+  const show = text => { const s = statusEl(); if (s) s.textContent = text ?? ''; };
+  const run = async () => {
+    if (el.dataset.confirm && !confirm(el.dataset.confirm)) return;
+    const body = el instanceof HTMLFormElement
+      ? Object.fromEntries([...new FormData(el)].filter(([, v]) => typeof v === 'string'))
+      : JSON.parse(el.dataset.body || '{}');
+    const button = el instanceof HTMLFormElement ? el.querySelector('[type=submit]') : el;
+    busy(button, true);
+    try {
+      let out = null;
+      const done = await withFreshAuth(async () => { out = await postTo(el.dataset.authApi, body); }, { label: button?.textContent.trim(), onMessage: show });
+      if (!done) return;
+      if (out?.url) show(`${el.dataset.done ?? 'Done.'} ${out.url}`);
+      else if (el.hasAttribute('data-reload')) location.reload();
+      else show(el.dataset.done ?? out?.message ?? 'Done.');
+      if (el instanceof HTMLFormElement && !el.hasAttribute('data-keep')) el.reset();
+    } catch (err) { show(errorMessage(err)); } finally { busy(button, false); }
+  };
+  if (el instanceof HTMLFormElement) el.addEventListener('submit', e => { e.preventDefault(); run(); });
+  else el.addEventListener('click', run);
+}
+
 function init() {
   document.querySelectorAll('form[data-passkey-login]').forEach(initLogin);
   document.querySelectorAll('form[data-passkey-signup]').forEach(initSignup);
   document.querySelectorAll('[data-account]').forEach(initAccount);
   document.querySelectorAll('form[data-account-delete]').forEach(initDelete);
   document.querySelectorAll('[data-passkey-recover]').forEach(initRecover);
+  document.querySelectorAll('[data-auth-api]').forEach(initApi);
 }
 
 if (typeof document !== 'undefined') {

@@ -30,11 +30,12 @@ export async function signInMethodCount(db: D1Database, userId: string): Promise
 }
 
 /** Service result; routes map a Fail onto a JSON error or a page. */
-export type Fail = { ok: false; status: ErrorStatus; code: string; message: string };
+/** `userId` is set on account_suspended so routes can ask the modules why (explainBlocked). */
+export type Fail = { ok: false; status: ErrorStatus; code: string; message: string; userId?: string };
 export type Result<T extends object = object> = ({ ok: true } & T) | Fail;
 export const fail = (status: ErrorStatus, code: string, message: string): Fail => ({ ok: false, status, code, message });
 
-export const blockedFail = (): Fail => fail(403, 'account_suspended', 'This account has been suspended.');
+export const blockedFail = (userId?: string): Fail => ({ ...fail(403, 'account_suspended', 'This account has been suspended.'), ...(userId ? { userId } : {}) });
 
 export interface AuditEntry { actorId: string | null; action: string; targetUserId?: string | null; details?: Record<string, unknown> }
 

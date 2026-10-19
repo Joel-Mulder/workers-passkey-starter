@@ -15,8 +15,9 @@ import { flowStartLimited, noteSecurityEvent } from './rate-limit';
 import { finishRecovery, inspectRecovery, startRecovery } from './recovery';
 import { completeOAuthSignup, finishPasskeySignup, getOAuthSignup, peekPasskeySignup, startPasskeySignup, type OAuthIdentity, type Registered } from './registration';
 import { createSession, destroySession, isFresh, markFreshAuth, requireFreshAuth, requireUser, secureCookies } from './session';
-import { getUser, toSessionUser, type Fail } from './users';
+import { getUser, isBlocked, toSessionUser, type Fail } from './users';
 import { validateProfile } from './validation';
+import { explainBlocked, moduleHtml, prepareSignup, signupParamsOf } from './extensions';
 import type { AuthContext, AuthEnv, AuthMethod, Provider, SignupRequest } from './types';
 
 const COPY = {
@@ -56,8 +57,17 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     return v === true ? null : typeof v === 'string' && v ? v : COPY.signupClosed;
   }
 
-  async function signedUp(c: C, reg: Registered, method: AuthMethod, identity?: OAuthIdentity) {
-    await createSession(c, cfg, reg.user, method);
+  /** Form/body fields that are neither profile fields nor module params, as strings (for the modules). */
+  const fieldsOf = (src: Record<string, unknown>, params: Record<string, string>) =>
+    Object.fromEntries(Object.entries(src).filter(([k, v]) => typeof v === 'string' && k !== 'name' && k !== 'username' && !(k in params) && v.length <= 1000)) as Record<string, string>;
+
+  /**
+   * After an account was created: a session when the account is active, else (e.g. waiting for approval) no session
+   * and the reason. onUserCreated runs either way, once.
+   */
+  async function signedUp(c: C, reg: Registered, method: AuthMethod, identity?: OAuthIdentity): Promise<Fail | null> {
+    const blocked = isBlocked(reg.user.status) ? await explainBlocked(c.env.DB, cfg, { ok: false, status: 403, code: 'account_suspended', message: 'This account isn’t active.', userId: reg.user.id } as Fail) : null;
+    if (!blocked) await createSession(c, cfg, reg.user, method);
     if (!reg.idempotent) {
       try {
         await cfg.onUserCreated({ c, user: toSessionUser(reg.user), method, identity: identity && { provider: identity.provider, email: identity.email, emailVerified: identity.emailVerified } });
@@ -65,6 +75,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
         logIncident('onUserCreated', e); // the account exists; a failing hook must not undo the signup
       }
     }
+    return blocked;
   }
 
   // ───────────── Pages ─────────────
@@ -72,18 +83,19 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   r.get('/auth/login', async c => {
     const returnTo = safeReturnTo(cfg, c.req.query('returnTo'));
     if (c.get('session')) return c.redirect(returnTo);
-    return loginPage(c, cfg, { returnTo, providers: oauthProvidersEnabled(c.env) });
+    return loginPage(c, cfg, { returnTo, providers: oauthProvidersEnabled(c.env), extra: await moduleHtml(cfg, m => m.html?.login?.(c, cfg)) });
   });
 
   r.get('/auth/signup', async c => {
     if (c.get('session')) return c.redirect(cfg.afterSignInPath);
-    return signupPage(c, cfg, { providers: oauthProvidersEnabled(c.env) });
+    const params = signupParamsOf(cfg, k => c.req.query(k));
+    return signupPage(c, cfg, { providers: oauthProvidersEnabled(c.env), params, extra: await moduleHtml(cfg, m => m.html?.signup?.(c, cfg, params)) });
   });
 
   r.get('/auth/account', signedIn, async c => {
     const v = await accountView(c.env.DB, uid(c));
     if (!v) return c.redirect(cfg.path('/auth/login'));
-    return accountPage(c, cfg, v, { providers: oauthProvidersEnabled(c.env), fresh: isFresh(c.get('session'), cfg.freshAuthMs) });
+    return accountPage(c, cfg, v, { providers: oauthProvidersEnabled(c.env), fresh: isFresh(c.get('session'), cfg.freshAuthMs), extra: await moduleHtml(cfg, m => m.html?.account?.(c, cfg, uid(c))) });
   });
 
   r.post('/auth/logout', async c => {
@@ -116,8 +128,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     const res = await finishLogin(c.env, body.flowId, body.response);
     if (!res.ok) {
       await noteSecurityEvent(c, cfg, { kind: res.code === 'account_suspended' ? 'signin-blocked' : 'signin-failed', code: `passkey:${res.code}` });
-      if ('credentialId' in res) return c.json({ error: { code: res.code, message: res.message }, credentialId: res.credentialId, rpId: res.rpId, signalUnknown: res.signalUnknown }, 404);
-      return fromFail(c, res);
+      if (!('credentialId' in res)) return fromFail(c, await explainBlocked(c.env.DB, cfg, res as Fail));
+      return c.json({ error: { code: res.code, message: res.message }, credentialId: res.credentialId, rpId: res.rpId, signalUnknown: res.signalUnknown }, 404);
     }
     await createSession(c, cfg, res.user, 'passkey');
     return c.json({
@@ -130,13 +142,16 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
 
   r.post('/auth/api/signup/options', async c => {
     if (await flowStartLimited(c, cfg, 'signup')) return jsonError(c, 429, 'rate_limited', COPY.rateLimited);
-    const body = await readJson<{ name?: unknown; username?: unknown }>(c);
-    if (!body) return badRequest(c);
+    const body = await readJson<Record<string, unknown>>(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return badRequest(c);
     const p = validateProfile(body);
     if (!p.ok) return fromFail(c, p);
     const refused = await signupRefusal({ c, method: 'passkey', username: p.value.username, name: p.value.name });
     if (refused) return jsonError(c, 403, 'signup_closed', refused);
-    const res = await startPasskeySignup(c.env, cfg, p.value);
+    const params = signupParamsOf(cfg, k => body[k]);
+    const data = await prepareSignup(cfg, { c, stage: 'details', method: 'passkey', params, fields: fieldsOf(body, params), profile: p.value });
+    if (data.ok === false) return fromFail(c, data as Fail);
+    const res = await startPasskeySignup(c.env, cfg, p.value, Date.now(), { params, data });
     return res.ok ? c.json({ flowId: res.flowId, options: res.options }) : fromFail(c, res);
   });
 
@@ -148,9 +163,11 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
       const refused = await signupRefusal({ c, method: 'passkey', username: flow.data.profile.username, name: flow.data.profile.name });
       if (refused) return jsonError(c, 403, 'signup_closed', refused);
     }
-    const res = await finishPasskeySignup(c.env, cfg, body.flowId, body.response);
+    const res = await finishPasskeySignup(c.env, cfg, body.flowId, body.response, Date.now(), c);
     if (!res.ok) return fromFail(c, res);
-    await signedUp(c, res, 'passkey');
+    const blocked = await signedUp(c, res, 'passkey');
+    // Created but not active yet (e.g. waiting for approval): no session; the page shows the message.
+    if (blocked) return c.json({ ok: true, pending: true, code: blocked.code, message: blocked.message, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id), name: res.user.username, displayName: res.user.name });
     return c.json({ ok: true, redirect: cfg.afterSignInPath, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id), name: res.user.username, displayName: res.user.name });
   });
 
@@ -250,7 +267,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   r.post('/auth/api/recovery/verify', async c => {
     const body = await readJson<{ flowId?: string; response?: unknown }>(c);
     if (!body) return badRequest(c);
-    const res = await finishRecovery(c.env, cfg, body.flowId, body.response);
+    const done = await finishRecovery(c.env, cfg, body.flowId, body.response);
+    const res = done.ok ? done : await explainBlocked(c.env.DB, cfg, done);
     if (!res.ok) {
       await noteSecurityEvent(c, cfg, { kind: res.code === 'account_suspended' ? 'signin-blocked' : 'signin-failed', code: `recovery:${res.code}` });
       return fromFail(c, res);
@@ -275,9 +293,13 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     const intent: Intent = INTENTS.includes(q) ? q : 'login';
     const s = c.get('session');
     const returnTo = safeReturnTo(cfg, c.req.query('returnTo'), intent === 'link' || intent === 'reauth' ? cfg.path('/auth/account') : cfg.afterSignInPath);
+    let params: Record<string, string> | undefined;
     if (intent === 'signup') {
       const refused = await signupRefusal({ c, method: provider });
       if (refused) return messagePage(c, cfg, { title: 'Create an account', message: refused, status: 403 });
+      params = signupParamsOf(cfg, k => c.req.query(k));
+      const checked = await prepareSignup(cfg, { c, stage: 'start', method: provider, params, fields: {} });
+      if (checked.ok === false) return messagePage(c, cfg, { title: 'Create an account', message: (checked as Fail).message, status: 403 });
     }
     let userId: string | undefined;
     let sessionId: string | undefined;
@@ -290,7 +312,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     }
     const binding = randomToken(32);
     setCookie(c, cfg.cookies.oauth, binding, { ...oauthCookie(c), maxAge: FLOW_TTL / 1000 });
-    return c.redirect((await startOAuth(c.env, cfg, { provider, intent, returnTo, userId, sessionId, binding })).toString());
+    return c.redirect((await startOAuth(c.env, cfg, { provider, intent, returnTo, userId, sessionId, binding, params })).toString());
   });
 
   /** Link/reauth only continue in the session of the user that started them. */
@@ -329,9 +351,11 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
         return c.redirect(cfg.path('/auth/signup/complete'), 303);
       case 'no_account':
         return noAccountPage(c, cfg, out.provider);
-      case 'error':
+      case 'error': {
+        const why = await explainBlocked(c.env.DB, cfg, out.fail);
         await noteSecurityEvent(c, cfg, { kind: flow.intent === 'reauth' ? 'reauth-failed' : out.fail.code === 'account_suspended' ? 'signin-blocked' : 'signin-failed', code: `${provider}:${out.fail.code}`, userId: flowUserId });
-        return failedPage(c, out.fail.message, out.fail.status === 409 ? 409 : 400);
+        return failedPage(c, why.message, why.status === 409 ? 409 : why.status === 403 ? 403 : 400);
+      }
     }
   }
 
@@ -361,7 +385,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     const flow = await getOAuthSignup(c.env.DB, getCookie(c, cfg.cookies.signup));
     if (!flow) return signupExpired(c);
     const { identity } = flow.data;
-    return signupCompletePage(c, cfg, { provider: identity.provider, email: identity.email, values: { name: identity.name ?? '', username: '' } });
+    const extra = await moduleHtml(cfg, m => m.html?.signupComplete?.(c, cfg, { params: flow.data.params ?? {}, identity, fields: {} }));
+    return signupCompletePage(c, cfg, { provider: identity.provider, email: identity.email, values: { name: identity.name ?? '', username: '' }, extra });
   });
 
   r.post('/auth/signup/complete', async c => {
@@ -371,17 +396,28 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     const { identity } = flow.data;
     const form = await c.req.parseBody();
     const values = { name: String(form.name ?? '').slice(0, 200), username: String(form.username ?? '').slice(0, 64) };
-    const again = (error: string, status: number) => signupCompletePage(c, cfg, { provider: identity.provider, email: identity.email, values, error, status });
+    const params = flow.data.params ?? {};
+    const fields = fieldsOf(form, params);
+    const again = async (error: string, status: number) => signupCompletePage(c, cfg, {
+      provider: identity.provider, email: identity.email, values, error, status,
+      extra: await moduleHtml(cfg, m => m.html?.signupComplete?.(c, cfg, { params, identity, fields })),
+    });
     // Each attempt tells whether a username is taken: throttle it like a flow start.
     if (await flowStartLimited(c, cfg, 'signup-complete')) return again(COPY.rateLimited, 429);
     const refused = await signupRefusal({ c, method: identity.provider, username: values.username.trim().toLowerCase(), name: values.name.trim(), identity: { provider: identity.provider, email: identity.email, emailVerified: identity.emailVerified } });
     if (refused) return again(refused, 403);
-    const res = await completeOAuthSignup(c.env, cfg, flowId, values);
+    const profile = validateProfile(values);
+    if (!profile.ok) return again(profile.message, 422);
+    const data = await prepareSignup(cfg, { c, stage: 'details', method: identity.provider, params, fields, profile: profile.value, identity });
+    if (data.ok === false) return again((data as Fail).message, (data as Fail).status === 409 ? 409 : 422);
+    const res = await completeOAuthSignup(c.env, cfg, flowId, values, Date.now(), { data, c });
     if (!res.ok) return again(res.message, res.status === 409 ? 409 : 422);
     deleteCookie(c, cfg.cookies.signup, cookieBase(c));
-    await signedUp(c, res, identity.provider, identity);
+    const blocked = await signedUp(c, res, identity.provider, identity);
+    if (blocked) return messagePage(c, cfg, { title: 'Account created', message: blocked.message, status: 200, links: [{ href: cfg.path('/auth/login'), label: 'Back to sign in' }] });
     return c.redirect(cfg.afterSignInPath, 303);
   });
 
+  for (const m of cfg.modules) m.routes?.(r, cfg);
   return r;
 }

@@ -37,28 +37,31 @@ ${(page.scripts ?? []).map(src => html`<script type="module" nonce="${nonce}" sr
 }
 
 const statusRegion = html`<p class="auth-status" data-auth-status role="status" aria-live="polite"></p>`;
-const startHref = (cfg: AuthConfig, p: Provider, intent: string, returnTo?: string) =>
-  `${cfg.path(`/auth/${p}/start`)}?intent=${intent}${returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ''}`;
+const startHref = (cfg: AuthConfig, p: Provider, intent: string, returnTo?: string, params: Record<string, string> = {}) =>
+  `${cfg.path(`/auth/${p}/start`)}?${new URLSearchParams({ intent, ...(returnTo ? { returnTo } : {}), ...params })}`;
+/** Module HTML (already escaped by the module's html`` templates). */
+const raw = (s: string | undefined) => new SafeHtml(s ?? '');
 
-function providerButtons(cfg: AuthConfig, providers: Record<Provider, boolean>, intent: 'login' | 'signup', returnTo?: string) {
+function providerButtons(cfg: AuthConfig, providers: Record<Provider, boolean>, intent: 'login' | 'signup', returnTo?: string, params?: Record<string, string>) {
   const list = (Object.keys(providers) as Provider[]).filter(p => providers[p]);
   if (!list.length) return html``;
   return html`<p class="auth-or">or</p>
-<ul class="auth-providers">${list.map(p => html`<li><a class="auth-button" href="${startHref(cfg, p, intent, returnTo)}">Continue with ${PROVIDER_NAMES[p]}</a></li>`)}</ul>`;
+<ul class="auth-providers">${list.map(p => html`<li><a class="auth-button" href="${startHref(cfg, p, intent, returnTo, params)}">Continue with ${PROVIDER_NAMES[p]}</a></li>`)}</ul>`;
 }
 
-export function loginPage(c: AuthContext, cfg: AuthConfig, o: { returnTo: string; providers: Record<Provider, boolean> }) {
+export function loginPage(c: AuthContext, cfg: AuthConfig, o: { returnTo: string; providers: Record<Provider, boolean>; extra?: string }) {
   const body = html`<h1>Sign in</h1>
 <form data-passkey-login data-return-to="${o.returnTo}">
   <button class="auth-button auth-button--primary" type="submit">Sign in with a passkey</button>
   ${statusRegion}
 </form>
 ${providerButtons(cfg, o.providers, 'login', o.returnTo)}
-<p class="auth-note">No account yet? <a href="${cfg.path('/auth/signup')}">Create an account</a></p>`;
+<p class="auth-note">No account yet? <a href="${cfg.path('/auth/signup')}">Create an account</a></p>
+${raw(o.extra)}`;
   return renderPage(c, cfg, { title: 'Sign in', body: body.value, scripts: [cfg.path('/auth/passkey.js')] });
 }
 
-export function signupPage(c: AuthContext, cfg: AuthConfig, o: { providers: Record<Provider, boolean>; refused?: string }) {
+export function signupPage(c: AuthContext, cfg: AuthConfig, o: { providers: Record<Provider, boolean>; refused?: string; params?: Record<string, string>; extra?: string }) {
   const body = o.refused
     ? html`<h1>Create an account</h1><p>${o.refused}</p><p><a href="${cfg.path('/auth/login')}">Sign in</a></p>`
     : html`<h1>Create an account</h1>
@@ -68,15 +71,16 @@ export function signupPage(c: AuthContext, cfg: AuthConfig, o: { providers: Reco
   <label for="username">Username</label>
   <input id="username" name="username" autocomplete="username" required pattern="[a-z0-9][a-z0-9_.\\-]{2,31}" autocapitalize="none" spellcheck="false" aria-describedby="username-help">
   <p class="auth-help" id="username-help">3–32 characters: lower-case letters, digits, . _ or -</p>
+  ${raw(o.extra)}
   <button class="auth-button auth-button--primary" type="submit">Create account with a passkey</button>
   ${statusRegion}
 </form>
-${providerButtons(cfg, o.providers, 'signup')}
+${providerButtons(cfg, o.providers, 'signup', undefined, o.params)}
 <p class="auth-note">Already have an account? <a href="${cfg.path('/auth/login')}">Sign in</a></p>`;
   return renderPage(c, cfg, { title: 'Create an account', body: body.value, scripts: o.refused ? [] : [cfg.path('/auth/passkey.js')], status: o.refused ? 403 : 200 });
 }
 
-export function signupCompletePage(c: AuthContext, cfg: AuthConfig, o: { provider: Provider; email: string | null; values: { name: string; username: string }; error?: string; status?: number }) {
+export function signupCompletePage(c: AuthContext, cfg: AuthConfig, o: { provider: Provider; email: string | null; values: { name: string; username: string }; error?: string; status?: number; extra?: string }) {
   const body = html`<h1>Choose a username</h1>
 <p>You’re signing up with ${PROVIDER_NAMES[o.provider]}${o.email ? html` (${o.email})` : ''}.</p>
 <form method="post" action="${cfg.path('/auth/signup/complete')}">
@@ -84,6 +88,7 @@ export function signupCompletePage(c: AuthContext, cfg: AuthConfig, o: { provide
   <input id="name" name="name" autocomplete="name" required minlength="2" maxlength="100" value="${o.values.name}">
   <label for="username">Username</label>
   <input id="username" name="username" autocomplete="username" required autocapitalize="none" spellcheck="false" value="${o.values.username}">
+  ${raw(o.extra)}
   ${o.error ? html`<p class="auth-error" role="alert">${o.error}</p>` : ''}
   <button class="auth-button auth-button--primary" type="submit">Create account</button>
 </form>
@@ -91,7 +96,7 @@ export function signupCompletePage(c: AuthContext, cfg: AuthConfig, o: { provide
   return renderPage(c, cfg, { title: 'Choose a username', body: body.value, status: o.status });
 }
 
-export function accountPage(c: AuthContext, cfg: AuthConfig, v: AccountView, o: { providers: Record<Provider, boolean>; fresh: boolean }) {
+export function accountPage(c: AuthContext, cfg: AuthConfig, v: AccountView, o: { providers: Record<Provider, boolean>; fresh: boolean; extra?: string }) {
   const total = v.passkeys.length + v.identities.length;
   const linked = new Set(v.identities.map(i => i.provider));
   const linkable = (Object.keys(o.providers) as Provider[]).filter(p => o.providers[p] && !linked.has(p));
@@ -125,6 +130,8 @@ export function accountPage(c: AuthContext, cfg: AuthConfig, v: AccountView, o: 
 
   <h2>Sessions</h2>
   <button type="button" class="auth-button" data-sign-out-everywhere>Sign out on all other devices</button>
+
+  ${raw(o.extra)}
 
   <h2>Delete account</h2>
   <form data-account-delete data-username="${v.user.username}">

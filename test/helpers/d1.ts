@@ -15,11 +15,15 @@ class Stmt {
   runSync() { const r = this.s().run(...(this.params as any[])); return { success: true, results: [], meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } }; }
 }
 
-export function createTestDb(): D1Database {
+/** `upTo`: apply migrations up to and including this file name (e.g. '0001_auth.sql' for the core alone). */
+export function createTestDb(o: { upTo?: string } = {}): D1Database {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON;');
   const dir = join(process.cwd(), 'migrations');
-  for (const f of readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) db.exec(readFileSync(join(dir, f), 'utf8'));
+  for (const f of readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
+    if (o.upTo && f > o.upTo) break;
+    db.exec(readFileSync(join(dir, f), 'utf8'));
+  }
   const api = {
     prepare: (sql: string) => new Stmt(db, sql),
     async batch(stmts: Stmt[]) {

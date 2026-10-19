@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "test": "vitest run",
     "check": "npm run typecheck && npm test",
-    "size": "wrangler deploy --dry-run --outdir dist"
+    "size": "wrangler deploy --dry-run --outdir dist",
+    "size:modules": "wrangler deploy src/example-modules.ts --dry-run --outdir dist-modules"
   },
   "engines": {
     "node": ">=22.5"

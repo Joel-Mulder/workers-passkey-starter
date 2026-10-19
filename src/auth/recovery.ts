@@ -103,7 +103,7 @@ export async function finishRecovery(env: Env, cfg: Pick<AuthConfig, 'audit'>, f
   }
   if (res[0]?.meta.changes !== 1) {
     const u = await getUser(db, userId);
-    return u && isBlocked(u.status) ? blockedFail() : fail(400, 'recovery_invalid', MSG.invalid);
+    return u && isBlocked(u.status) ? blockedFail(u.id) : fail(400, 'recovery_invalid', MSG.invalid);
   }
   return { ok: true, user: (await getUser(db, userId))! };
 }

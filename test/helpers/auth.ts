@@ -67,6 +67,10 @@ export const credentialResponse = (id: string, userHandle?: string) =>
 
 export const count = async (db: D1Database, sql: string, ...params: unknown[]) => (await db.prepare(sql).bind(...params).first<{ n: number }>())!.n;
 
+/** Work handed to ctx.waitUntil by the requests made through client(); await settle() before checking its effects. */
+const background: Promise<unknown>[] = [];
+export const settle = async () => { while (background.length) await background.shift(); };
+
 /** Requests against a Worker `fetch`: same-origin by default for writes; `cookie`, `ip` and `origin` per call. */
 export function client(fetchFn: (req: Request, env: AuthBindings, ctx: ExecutionContext) => Response | Promise<Response>, env: AuthBindings) {
   return (path: string, init: RequestInit & { cookie?: string; ip?: string; origin?: string | null } = {}) => {
@@ -74,7 +78,7 @@ export function client(fetchFn: (req: Request, env: AuthBindings, ctx: Execution
     if (init.method && init.method !== 'GET' && init.origin !== null) headers.set('origin', init.origin ?? ORIGIN);
     if (init.cookie) headers.set('cookie', init.cookie);
     if (init.ip) headers.set('CF-Connecting-IP', init.ip);
-    const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+    const ctx = { waitUntil(p: Promise<unknown>) { background.push(p); }, passThroughOnException() {} } as unknown as ExecutionContext;
     return fetchFn(new Request(ORIGIN + path, { ...init, headers }), env, ctx);
   };
 }

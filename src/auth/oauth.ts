@@ -56,9 +56,11 @@ export interface OAuthFlow {
   sessionId?: string;
   /** SHA-256 (hex) of the binding cookie set on the browser that started the flow. */
   binding: string;
+  /** Signup: the modules' params (e.g. an invite token), carried to the username step. */
+  params?: Record<string, string>;
 }
 
-export async function startOAuth(env: AuthBindings, cfg: AuthConfig, o: { provider: Provider; intent: Intent; returnTo: string; userId?: string; sessionId?: string; binding: string }, at = Date.now()): Promise<URL> {
+export async function startOAuth(env: AuthBindings, cfg: AuthConfig, o: { provider: Provider; intent: Intent; returnTo: string; userId?: string; sessionId?: string; binding: string; params?: Record<string, string> }, at = Date.now()): Promise<URL> {
   const state = generateState();
   const nonce = randomToken(16);
   let url: URL;
@@ -75,6 +77,7 @@ export async function startOAuth(env: AuthBindings, cfg: AuthConfig, o: { provid
   url.searchParams.set('nonce', nonce);
   await createFlow<OAuthFlow>(env.DB, 'oauth', {
     provider: o.provider, intent: o.intent, nonce, codeVerifier, returnTo: o.returnTo, sessionId: o.sessionId, binding: await sha256Hex(o.binding),
+    ...(o.params && Object.keys(o.params).length ? { params: o.params } : {}),
   }, { id: state, userId: o.userId ?? null, at });
   return url;
 }
@@ -171,7 +174,7 @@ export async function resolveOAuth(env: AuthBindings, cfg: AuthConfig, flow: OAu
         : { kind: 'error', fail: fail(409, 'identity_taken', MSG.taken) };
     }
     const user = await getUser(db, flowUserId);
-    if (!user || isBlocked(user.status)) return { kind: 'error', fail: blockedFail() };
+    if (!user || isBlocked(user.status)) return { kind: 'error', fail: blockedFail(user?.id) };
     try {
       await db.batch([
         db.prepare('INSERT INTO oauth_identities (id, user_id, provider, subject, email, email_verified, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -188,12 +191,12 @@ export async function resolveOAuth(env: AuthBindings, cfg: AuthConfig, flow: OAu
   if (existing) {
     const user = await getUser(db, existing.user_id);
     if (!user) return { kind: 'no_account', provider: identity.provider };
-    if (isBlocked(user.status)) return { kind: 'error', fail: blockedFail() };
+    if (isBlocked(user.status)) return { kind: 'error', fail: blockedFail(user.id) };
     await db.prepare('UPDATE oauth_identities SET last_used_at = ?, email = ?, email_verified = ? WHERE id = ?')
       .bind(at, identity.email, identity.emailVerified ? 1 : 0, existing.id).run();
     return { kind: 'signin', user, returnTo: flow.returnTo };
   }
 
-  if (flow.intent === 'signup') return { kind: 'signup', flowId: await startOAuthSignup(db, identity, at) };
+  if (flow.intent === 'signup') return { kind: 'signup', flowId: await startOAuthSignup(db, identity, at, flow.params) };
   return { kind: 'no_account', provider: identity.provider };
 }

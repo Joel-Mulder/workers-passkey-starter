@@ -1,10 +1,12 @@
 // AuthOptions with defaults filled in. Every module takes the resolved config explicitly; nothing is global.
+import type { AuthModule } from './extensions';
 import type { AuthOptions, AuthContext, PageInput, SecurityEvent } from './types';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 export interface AuthConfig {
+  modules: AuthModule[];
   appName: string;
   basePath: string;
   cookies: { session: string; oauth: string; signup: string; path: string };
@@ -32,7 +34,11 @@ export function resolveConfig(o: AuthOptions): AuthConfig {
   const prefix = o.cookiePrefix ?? 'auth';
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(prefix)) throw new Error('cookiePrefix: letters, digits, _ and - only');
   const path = (p: string) => basePath + (p.startsWith('/') ? p : '/' + p);
+  const modules = o.modules ?? [];
+  const names = modules.map(m => m.name);
+  if (new Set(names).size !== names.length) throw new Error('Each module may be listed once');
   return {
+    modules,
     appName: o.appName,
     basePath,
     cookies: { session: `${prefix}_session`, oauth: `${prefix}_oauth`, signup: `${prefix}_signup`, path: basePath || '/' },

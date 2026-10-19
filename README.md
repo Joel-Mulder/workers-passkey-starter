@@ -7,10 +7,11 @@ Sign-in for a [Hono](https://hono.dev) app on Cloudflare Workers:
 - **Sessions:** database sessions with instant revocation and "sign out everywhere".
 - **Account lifecycle:** self-service account deletion, and recovery through a one-time link for someone who lost every passkey.
 - **Hardening:** CSRF origin check, rate limits, security headers and an audit log.
+- **Optional modules** (off by default): mail (Resend), e-mail verification, approval + admin, invites and signup links. See [Modules](#modules).
 
 **D1 is the only store.** No auth framework, no KV, no Durable Objects, no in-memory state.
 
-The code is extracted from a production app. Project-specific parts were removed (invites, admin approval, e-mail verification). They are now hooks.
+The code is extracted from a production app. Project-specific parts were removed; invites, admin approval and e-mail verification came back as generic, optional modules.
 
 MIT licensed (see [LICENSE](LICENSE)).
 
@@ -56,7 +57,7 @@ sequenceDiagram
 
 An editable version of the architecture chart is in [docs/architecture.drawio](docs/architecture.drawio) (opens in diagrams.net; Lucidchart: File → Import → draw.io).
 
-Contents: [At a glance](#at-a-glance) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Account deletion and recovery](#account-deletion-and-recovery) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
+Contents: [At a glance](#at-a-glance) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Account deletion and recovery](#account-deletion-and-recovery) · [Modules](#modules) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
 
 ## Quick start
 
@@ -77,7 +78,7 @@ Run the checks:
 npm run check
 ```
 
-That is the typecheck plus 85 tests. They use an in-memory D1 and stub only the signature checks.
+That is the typecheck plus 120 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
 
 ## How it works
 
@@ -280,6 +281,7 @@ createAuth({
 | `freshAuthMs` | 5 min | Step-up window |
 | `flowStartsPerWindow` / `flowStartWindowMs` | 60 / 10 min | Per-IP rate limit for unauthenticated flow starts |
 | `audit` | `true` | Write `audit_log` rows |
+| `modules` | `[]` | Optional modules, see [Modules](#modules) |
 | `allowSignup`, `onUserCreated`, `onUserDeleted`, `onSecurityEvent`, `renderPage` | | Hooks, see above and `src/auth/types.ts` |
 | `securityHeaders.csp` | | Extra CSP sources, e.g. `{ 'img-src': ['https://cdn.example.com'] }` |
 | `maxBodyBytes` | 256 KB | Body limit |
@@ -323,7 +325,14 @@ This needs a paid Apple Developer account, and the callback must be https on a r
 
 - **CPU.** The expensive work runs on the runtime's native Web Crypto, not in JavaScript: ES256/RS256 signature checks, the ID-token check and Apple's client-secret signing. So very little JavaScript CPU time is spent per sign-in. Waiting on D1 or Google/Apple is I/O, which doesn't count towards CPU time. No password hashing (PBKDF2, bcrypt) is involved anywhere.
 - **Bundle.** Only small, Worker-friendly libraries; no Node-only JWT or crypto polyfills, no client SDK in the server bundle.
-  - This example measured with `npm run size` (`wrangler deploy --dry-run`, `minify: true`): **451 KiB / 131 KiB gzip** (unminified: about 0.9 MiB / 180 KiB).
+  - Measured with `wrangler deploy --dry-run` and `minify: true`:
+
+    | Build | Size |
+    |---|---|
+    | Core, no modules (`npm run size`) | **456 KiB / 133 KiB gzip** |
+    | Every module on (`npm run size:modules`) | **486 KiB / 141 KiB gzip** |
+
+    Modules are separate imports, so the ones you don't list aren't bundled.
   - The free plan allows 3 MB gzip.
   - The largest part is `@simplewebauthn/server` and its ASN.1/X.509 dependencies. It needs them for attestation formats; this kit uses `attestationType: 'none'`.
 - **No in-memory state.** Challenges, OAuth state, sessions and rate counters all live in D1, so any isolate can serve any step of a ceremony. Module-level variables (a common cause of "works locally, fails deployed") hold nothing but configuration and the JWKS cache.
@@ -352,6 +361,162 @@ if (res.ok) await sendMail(to, `Recover your account: ${res.url}`); // your mail
 - Limits: 60 ceremony starts per 10 minutes per IP, and 10 per link.
 - Suspended accounts can't be recovered, and you can't issue a link for them.
 - Treat a recovery URL like a password: whoever opens it first takes over the account.
+
+## Modules
+
+Four optional modules, ported from the production app and kept generic. Each one is **off unless you list it**:
+
+```ts
+import { createAuth } from './auth';
+import { mail, resendMailer, consoleMailer, emailVerification, admin, invites } from './auth/modules';
+
+const auth = createAuth({
+  appName: 'My App',
+  modules: [
+    mail({ mailer: env => env.RESEND_API_KEY ? resendMailer({ apiKey: env.RESEND_API_KEY as string, from: env.MAIL_FROM as string }) : consoleMailer(env) }),
+    emailVerification(),                 // optional address at signup; { required: true } to require one
+    admin({ signupMode: 'approval' }),   // 'open' (default) | 'approval' | 'invite-only'
+    invites(),                           // needs admin()
+  ],
+});
+```
+
+What you need:
+
+- **Migration `0002_modules.sql`** for any module. It is additive only: `users` gets `email`, `email_verified_at`, `role` and `approval`, plus three new tables.
+- **Mail:** only `mail()` sends anything. `emailVerification()` refuses to start without it. `admin()` and `invites()` work without it, but then they mail nothing (admins see the links instead).
+- **A working example** with every module on: `src/example-modules.ts`. Deploy it with `wrangler deploy src/example-modules.ts`, or copy its `createAuth()` call.
+- **The core never imports a module.** It only calls a few hooks (`src/auth/extensions.ts`). With no modules listed, behaviour is unchanged and none of their code is bundled.
+
+### Mail (`mail()`)
+
+**Adapters:**
+
+- `resendMailer({ apiKey, from })` sends through Resend's HTTP API with `fetch`; no SDK.
+- `consoleMailer(env)` prints mail instead of sending it. The body (with its links) is only printed when `APP_ENV=local`.
+- `memoryMailer()` keeps mail in an array, for tests.
+- Your own adapter is an object with `send({ to, subject, text, html? })`.
+
+**Templates:** English and plain text, replaceable per template:
+
+```ts
+mail({ mailer, templates: { invite: (d, app) => ({ subject: `Join ${app}`, text: `…${d.link}…`, html: '…' }) } })
+```
+
+The template names are `verify-email`, `email-change-notice`, `recovery`, `signup-pending-admin`, `account-approved` and `invite`. Their data is listed in `TemplateData` in `src/auth/modules/mail.ts`.
+
+**Limits and logging:**
+
+- At most 5 mails per recipient per hour (`perRecipientPerHour`). The key is an HMAC of the address, never the address itself.
+- A failed send is logged without the address and never breaks the request.
+
+**Resend setup:**
+
+1. Create an account at resend.com. Under **Domains**, add your domain (or a subdomain such as `mail.example.com`) and add the DNS records it shows (SPF/DKIM; DMARC recommended). Wait for "Verified".
+2. Under **API Keys**, create a key with **Sending access** limited to that domain.
+3. Run `wrangler secret put RESEND_API_KEY`, and set `MAIL_FROM` in `wrangler.jsonc`, e.g. `"My App <accounts@mail.example.com>"`. The sender must be on the verified domain.
+4. Locally, leave `RESEND_API_KEY` empty in `.dev.vars`; mail then appears in the `wrangler dev` console.
+
+### E-mail verification (`emailVerification()`)
+
+**Signup:**
+
+- Signup gets an e-mail field: optional, or `required: true`. The Google/Apple username step gets the field too, prefilled with the provider's address.
+- An address is **only put on the account once it is confirmed**. Until then it waits in `email_verifications`, so typing someone else's address claims nothing. The first account to confirm an address gets it; later confirmations answer "taken".
+- A Google/Apple address that the provider verified, and that the user keeps, counts as confirmed at once.
+
+**The link:**
+
+- It holds a random token. Only its SHA-256 is stored, it is valid for 1 day and it works once.
+- Opening the link (GET) only shows a "Confirm address" button; the POST uses it up. Mail scanners that open links don't consume them.
+- The page sends `Referrer-Policy: no-referrer`.
+
+**Account page:**
+
+- Shows the confirmed address and any address waiting for confirmation.
+- "Change address" needs step-up. It sends a link to the new address and a notice to the old confirmed one. The old address stays until the new one is confirmed.
+- "Send the link again" sends a fresh link to the waiting address.
+
+**Lost your passkey?** The login page links to `/auth/recover`. It asks for the address and, when it belongs to an active account, mails a recovery link (`issueRecoveryLink`).
+
+- The answer is the same whether or not the address is known.
+- The mail goes out after the response (`waitUntil`), so timing doesn't tell either.
+- Turn it off with `recoveryByEmail: false`.
+
+### Approval and admin (`admin()`)
+
+**`signupMode`:**
+
+| Mode | Who can sign up |
+|---|---|
+| `'open'` (default) | Everyone, active at once |
+| `'approval'` | Everyone, but new accounts wait for an admin. Signups through an invite or signup link are approved at once |
+| `'invite-only'` | Only through an invite or signup link (`invites()`). Refused before the passkey sheet or the trip to Google/Apple |
+
+**States.** Waiting and rejected accounts are `status = 'suspended'` with `approval = 'pending' | 'rejected'`, so the core already refuses them everywhere. The module only explains why at sign-in ("waiting for approval", "not approved"). A waiting account gets no session after signup; the signup page shows the message instead.
+
+**The first admin** is set by hand, once:
+
+```bash
+npx wrangler d1 execute DB --remote --command "UPDATE users SET role = 'admin' WHERE username = 'you'"
+```
+
+**Admin page and API** (`/auth/admin`, `/auth/api/admin/users`):
+
+- Lists accounts, waiting ones first, filterable by state and searchable.
+- Actions: approve, reject, suspend, reactivate, sign out everywhere, recovery link.
+- Every action needs **step-up**.
+- Every action is **optimistic**: the request carries the `access_version` the admin saw. A changed account answers 409 `stale`, so two admins can't overwrite each other.
+- Every action advances `access_version` (ending the account's sessions) and writes an audit row.
+- Admins can't act on other admins or on themselves.
+- A recovery link is mailed to a confirmed address; without one it is shown to the admin to hand over.
+
+**Mail:** admins with a confirmed address are told about each waiting signup (`notifyAdmins: false` to stop that), and the user is told when approved.
+
+`requireAdmin(auth.config)` is exported for your own admin routes. It reads the role from the database on every request, so a demoted admin loses access at once.
+
+### Invites and signup links (`invites()`, needs `admin()`)
+
+**Invites** (admin page or `POST /auth/api/admin/invites { email }`):
+
+- One address, valid 7 days (`inviteDays`), works once.
+- Mailed when `mail()` is on; the URL is also returned to the admin.
+- `/auth/invite/<token>` opens the signup page with the address locked. The address counts as confirmed, because the invite reached it.
+
+**Signup links** (`POST /auth/api/admin/links { label, maxUses, days }`):
+
+- A number of uses (1–1000) until a date (1–90 days), withdrawable.
+- `/auth/join/<token>` opens the signup page.
+- The count only goes up: a deleted account never frees its place.
+- Signup attempts are limited per link (60 per 10 minutes), because each attempt shows whether a username is taken.
+
+**How tokens are used:**
+
+- Only the SHA-256 of a token is stored.
+- Both kinds are consumed **inside the registration batch**: a gate statement runs first, and the user row is only inserted when it changed a row. Of two signups racing for the last place, exactly one account is created, and the other leaves nothing behind.
+- Tokens survive the Google/Apple round trip in the OAuth flow.
+
+### Instructions for coding agents (modules)
+
+- **Pick modules by need.**
+  - Mail and verified addresses: `mail()` + `emailVerification()`.
+  - A closed group: `admin({ signupMode: 'approval' })`.
+  - Invitations: add `invites()`.
+  - Run `0002_modules.sql` whenever any module is listed.
+- **Writing your own module:** implement `AuthModule` (`src/auth/extensions.ts`).
+  - `prepareSignup` validates and returns data.
+  - `register` returns statements for the atomic registration batch. Guard them with `ctx.exists`. At most one `gate` per signup.
+  - `afterRegister` mails.
+  - `blockedReason` explains refusals.
+  - `routes` and `html` add pages.
+  - Keep module code out of `src/auth/*.ts` core files.
+- **Keep these module invariants (tested):**
+  - Unverified addresses never reach `users.email`.
+  - Verification and recovery tokens are hashed, expire and are single use.
+  - Invite and link quotas are consumed in the same batch as the account.
+  - Admin actions require step-up and the expected `access_version`.
+  - Mail logs never contain addresses or bodies outside `APP_ENV=local`.
+- **Don't** add mail SDKs (use `fetch`), store raw tokens, or let `/auth/recover` reveal whether an address exists.
 
 ## Routes
 
@@ -404,15 +569,27 @@ All paths are relative to `basePath`. Pages live under `/auth/*` and JSON under 
 | GET | `/auth/:provider/resume` | Second half of an Apple link/reauth |
 | GET / POST | `/auth/signup/complete` | Username step after Google/Apple |
 
+**Modules** (only when listed):
+
+| Method | Path | Module |
+|---|---|---|
+| GET / POST | `/auth/verify-email/:token` | e-mail: confirm page / confirm |
+| POST | `/auth/api/account/email`, `/auth/api/account/email/resend` | e-mail: change (step-up) / resend |
+| GET, POST | `/auth/recover`, `/auth/api/recovery/request` | e-mail: "Lost your passkey?" |
+| GET | `/auth/admin`, `/auth/api/admin/users` | admin: page / list |
+| POST | `/auth/api/admin/users/:id/:action` | admin: `approve`, `reject`, `suspend`, `reactivate`, `sign-out`, `recovery-link` (step-up, `{ expectedVersion }`) |
+| GET | `/auth/invite/:token`, `/auth/join/:token` | invites: to the signup page |
+| GET, POST | `/auth/api/admin/invites`, `/auth/api/admin/links` | invites: list / create (step-up) |
+| POST | `/auth/api/admin/invites/:id/revoke`, `/auth/api/admin/links/:id/revoke` | invites: withdraw (step-up) |
+
 Errors are JSON `{ error: { code, message } }`. Clients branch on `code`: `reauth_required`, `rate_limited`, `username_taken`, `last_sign_in_method`, `unknown_credential`, `signup_closed`, …
 
 ## Not included (by design)
 
 These are hooks or places to extend; each is a small addition:
 
-- E-mail on the account and e-mail verification: use `onUserCreated`, plus your own table.
-- Admin screens and suspending users: set `status = 'suspended'`, then call `auth.revokeAllSessions`.
-- Deciding who gets a recovery link, and delivering it: call `auth.issueRecoveryLink` from your admin or support flow.
+- Without the modules: e-mail and verification (use `onUserCreated`), admin screens (set `status = 'suspended'`, then call `auth.revokeAllSessions`), and delivering recovery links (call `auth.issueRecoveryLink` from your support flow). The [modules](#modules) do all three.
+- Managing admins in a UI: promote or demote them in the database.
 - Passkey autofill (conditional UI, `mediation: 'conditional'`).
 
 ## Instructions for coding agents

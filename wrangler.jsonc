@@ -20,6 +20,8 @@
     // The host of APP_ORIGIN, or a registrable parent of it (example.com for app.example.com). Passkeys are bound to
     // it: changing it later makes every existing passkey unusable.
     "PASSKEY_RP_ID": "<YOUR_DOMAIN>"
+    // Optional modules with mail (src/example-modules.ts): the sender, on a domain verified in Resend.
+    // "MAIL_FROM": "Example App <accounts@<YOUR_DOMAIN>>"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "<D1_DATABASE_NAME>", "database_id": "<D1_DATABASE_ID>", "migrations_dir": "migrations" }
@@ -34,4 +36,5 @@
   //   APPLE_TEAM_ID
   //   APPLE_KEY_ID
   //   APPLE_PRIVATE_KEY     the .p8 file's contents
+  //   RESEND_API_KEY        optional: mail() module with resendMailer (a "Sending access" key for your domain)
 }

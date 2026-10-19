@@ -12,3 +12,7 @@ APPLE_TEAM_ID=
 APPLE_KEY_ID=
 # The .p8 contents on one line with \n for the line breaks, in double quotes.
 APPLE_PRIVATE_KEY=
+
+# Optional: the mail() module (src/example-modules.ts). Without a key, mail is printed to the console.
+RESEND_API_KEY=
+MAIL_FROM=

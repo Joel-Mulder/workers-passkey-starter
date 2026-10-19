@@ -93,6 +93,8 @@ export interface AuthOptions {
   afterSignInPath?: string;
   /** Session lifetime, sliding. Default 30 days. */
   sessionTtlMs?: number;
+  /** Absolute session lifetime from sign-in, however often it is used. Default 90 days. */
+  maxSessionAgeMs?: number;
   /** Renew the sliding session at most this often. Default 1 day. */
   renewAfterMs?: number;
   /** How long a sign-in or step-up counts as fresh for requireFreshAuth. Default 5 minutes. */
@@ -100,6 +102,11 @@ export interface AuthOptions {
   /** Unauthenticated flow starts (passkey options, Google/Apple start, signup) per IP per window. Default 60 per 10 min. */
   flowStartsPerWindow?: number;
   flowStartWindowMs?: number;
+  /**
+   * The client address the per-IP limits key on. Default: Cloudflare's `CF-Connecting-IP`. Override when you know
+   * better (e.g. key IPv6 on its /64). Never read X-Forwarded-For: anyone can set it.
+   */
+  clientIp?: (req: Request) => string;
   /** Write audit_log rows (same batch as each change). Default true. */
   audit?: boolean;
   /**

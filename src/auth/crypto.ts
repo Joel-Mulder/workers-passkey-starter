@@ -23,6 +23,8 @@ export async function sha256Hex(input: string): Promise<string> {
 
 /** HMAC-SHA256 with a purpose-separated key derived from `secret` (SESSION_SECRET). */
 export async function hmac(secret: string, purpose: string, message: string): Promise<string> {
+  // Fail closed: without a real secret, rate-limit and mail-limit keys would be predictable.
+  if (typeof secret !== 'string' || secret.length < 32) throw new Error('SESSION_SECRET must be set to at least 32 random characters');
   const key = await crypto.subtle.importKey('raw', enc.encode(`${purpose}\u0000${secret}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return b64url(await crypto.subtle.sign('HMAC', key, enc.encode(message)));
 }

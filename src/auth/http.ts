@@ -21,6 +21,8 @@ export function safeReturnTo(cfg: AuthConfig, value: string | undefined | null, 
 
 /** Parse a JSON body of at most `max` bytes (the global body limit already capped the stream). */
 export async function readJson<T>(c: AuthContext, max = 64 * 1024): Promise<T | null> {
+  // Only real JSON requests: a cross-site <form enctype="text/plain"> can never reach a JSON handler.
+  if (!(c.req.header('content-type') ?? '').toLowerCase().includes('application/json')) return null;
   const buf = await c.req.arrayBuffer();
   if (buf.byteLength > max) return null;
   try { return JSON.parse(new TextDecoder().decode(buf)) as T; } catch { return null; }

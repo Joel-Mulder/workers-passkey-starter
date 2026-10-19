@@ -3,7 +3,8 @@ import { fail, type Fail } from './users';
 
 export const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 // eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+// Control characters, line separators and bidi marks/overrides/isolates (they can disguise a name in admin lists).
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/;
 
 export const MSG = {
   nameLength: 'Your name must be between 2 and 100 characters long.',

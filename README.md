@@ -78,7 +78,7 @@ Run the checks:
 npm run check
 ```
 
-That is the typecheck plus 127 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
+That is the typecheck plus 137 tests, the modules included. They use an in-memory D1 and stub only the signature checks.
 
 ## How it works
 
@@ -175,10 +175,13 @@ Apple's cross-site POST arrives without the `SameSite=Lax` session cookie. `link
 - **Session cookie** `auth_session`:
   - HttpOnly, `SameSite=Lax`, Secure when deployed;
   - D1 stores only `SHA-256(token)`;
-  - lasts 30 days and slides (renewed at most once a day);
+  - lasts 30 days and slides (renewed at most once a day), but never longer than 90 days after sign-in (`maxSessionAgeMs`);
+  - named `__Host-auth_session` when deployed at `/` (`__Secure-` under a base path), so a sibling subdomain can't plant or overwrite it; the OAuth and signup cookies get the same prefix;
   - revoked instantly through `users.access_version` (`revokeAllSessions`, sign out everywhere, credential removal).
-- **CSRF:** every write must carry `Origin: APP_ORIGIN`. This, together with SameSite=Lax, replaces CSRF tokens. Only Apple's callback is exempt.
-- **Rate limits:** fixed windows in D1 `rate_counters`, 60 flow starts per 10 minutes per IP and purpose. The key is an HMAC of the IP (`SESSION_SECRET`); raw IPs are never stored.
+- **CSRF:** every write must carry `Origin: APP_ORIGIN`. This, together with SameSite=Lax, replaces CSRF tokens. Only Apple's callback is exempt. `auth.routes` enforces it itself; JSON endpoints also require `Content-Type: application/json`.
+- **Caching:** every `/auth/api/*` response carries `Cache-Control: no-store`.
+- **`SESSION_SECRET`:** at least 32 characters; requests that need it fail closed when it is missing or short.
+- **Rate limits:** fixed windows in D1 `rate_counters`, 60 flow starts per 10 minutes per IP and purpose. The key is an HMAC of the IP (`SESSION_SECRET`); raw IPs are never stored. Users behind one NAT or carrier-grade NAT (an office, a campus, mobile networks) share a budget, so someone on that address can use it up for the others; raise the limit or pass `clientIp` if that matters to you.
 - **Security headers** (`auth.securityHeaders`):
   - CSP with a per-response nonce and `strict-dynamic`;
   - `form-action` limited to self + Google + Apple;
@@ -275,11 +278,13 @@ createAuth({
 |---|---|---|
 | `appName` | required | Shown in the passkey sheet (RP name) and page titles |
 | `basePath` | `''` | Where `auth.routes` is mounted |
-| `cookiePrefix` | `auth` | Cookie names: `auth_session`, `auth_oauth`, `auth_signup` |
+| `cookiePrefix` | `auth` | Cookie names: `auth_session`, `auth_oauth`, `auth_signup` (with a `__Host-`/`__Secure-` prefix when deployed) |
 | `afterSignInPath` | `/` | Target after sign-in without `returnTo` |
 | `sessionTtlMs` / `renewAfterMs` | 30 days / 1 day | Sliding sessions |
+| `maxSessionAgeMs` | 90 days | Absolute session lifetime; then the user signs in again |
 | `freshAuthMs` | 5 min | Step-up window |
 | `flowStartsPerWindow` / `flowStartWindowMs` | 60 / 10 min | Per-IP rate limit for unauthenticated flow starts |
+| `clientIp` | `CF-Connecting-IP` | Client address for the per-IP limits |
 | `audit` | `true` | Write `audit_log` rows |
 | `modules` | `[]` | Optional modules, see [Modules](#modules) |
 | `allowSignup`, `onUserCreated`, `onUserDeleted`, `onSecurityEvent`, `renderPage` | | Hooks, see above and `src/auth/types.ts` |

@@ -292,11 +292,12 @@ export async function renamePasskey(db: D1Database, userId: string, id: string, 
  * Delete one of the user's own passkeys, never their last way to sign in (passkeys + linked identities). In the same
  * batch access_version advances, so every other session ends (the removed passkey may have been used elsewhere);
  * `keepSessionId` (this device) moves to the new version.
+ * `rpId` (env.PASSKEY_RP_ID): only passkeys registered for this site count as a remaining way in.
  */
-export async function deletePasskey(db: D1Database, cfg: Pick<AuthConfig, 'audit'>, userId: string, id: string, at = Date.now(), keepSessionId: string | null = null): Promise<Result> {
+export async function deletePasskey(db: D1Database, cfg: Pick<AuthConfig, 'audit'>, userId: string, id: string, at = Date.now(), keepSessionId: string | null = null, rpId = ''): Promise<Result> {
   const res = await db.batch(changeAndRotateStmts(db,
     db.prepare(`DELETE FROM passkeys WHERE id = ?1 AND user_id = ?2
-      AND (SELECT COUNT(*) FROM passkeys WHERE user_id = ?2) + (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?2) > 1`).bind(id, userId),
+      AND (SELECT COUNT(*) FROM passkeys WHERE user_id = ?2 AND (?3 = '' OR rp_id = ?3)) + (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?2) > 1`).bind(id, userId, rpId),
     auditStmts(db, cfg, { actorId: userId, action: 'passkey-removed', targetUserId: userId, details: { passkeyId: id } }, at, 'changes() = 1'),
     userId, keepSessionId, at));
   if (res[0]?.meta.changes === 1) return { ok: true };

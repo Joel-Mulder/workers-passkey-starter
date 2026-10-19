@@ -14,7 +14,8 @@ import {
 import { flowStartLimited, noteSecurityEvent } from './rate-limit';
 import { finishRecovery, inspectRecovery, startRecovery } from './recovery';
 import { completeOAuthSignup, finishPasskeySignup, getOAuthSignup, peekPasskeySignup, startPasskeySignup, type OAuthIdentity, type Registered } from './registration';
-import { createSession, destroySession, isFresh, markFreshAuth, requireFreshAuth, requireUser, secureCookies } from './session';
+import { cookieName, createSession, destroySession, isFresh, markFreshAuth, requireFreshAuth, requireUser, secureCookies } from './session';
+import { originCheck } from './security';
 import { getUser, isBlocked, toSessionUser, type Fail } from './users';
 import { validateProfile } from './validation';
 import { explainBlocked, moduleHtml, prepareSignup, signupParamsOf } from './extensions';
@@ -37,6 +38,10 @@ interface OAuthResume { flow: OAuthFlow; userId: string | null; identity: OAuthI
 
 export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   const r = new Hono<AuthEnv>();
+  // CSRF lives in the router itself, so a missing or misordered app-level originCheck can't leave these writes open.
+  r.use('*', originCheck(cfg));
+  // Auth API responses carry personal data: never cache them, whatever the app's own header middleware does.
+  r.use('*', async (c, next) => { await next(); if (new URL(c.req.url).pathname.includes('/api/')) c.res.headers.set('Cache-Control', 'no-store'); });
   const signedIn = requireUser(cfg);
   const fresh = requireFreshAuth(cfg);
   type C = AuthContext;
@@ -49,6 +54,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
    * The OAuth binding cookie. Apple answers with a cross-site form post, which only carries SameSite=None cookies,
    * so it is None (+ Secure) when deployed; local dev over http uses Lax (Apple can't redirect to http anyway).
    */
+  const oauthName = (c: C) => cookieName(c, cfg.cookies.oauth, cfg.path('/auth'));
+  const signupName = (c: C) => cookieName(c, cfg.cookies.signup, cfg.cookies.path);
   const oauthCookie = (c: C) => ({ path: cfg.path('/auth'), secure: secureCookies(c), httpOnly: true, sameSite: (secureCookies(c) ? 'None' : 'Lax') as 'None' | 'Lax' });
 
   /** null = allowed, else the message to show. */
@@ -63,11 +70,12 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
 
   /**
    * After an account was created: a session when the account is active, else (e.g. waiting for approval) no session
-   * and the reason. onUserCreated runs either way, once.
+   * and the reason. onUserCreated runs either way, once. A passkey signup repeated after success (same flow, same
+   * credential) gets no new session: that request isn't bound to this browser, so a replayed body must not sign in.
    */
   async function signedUp(c: C, reg: Registered, method: AuthMethod, identity?: OAuthIdentity): Promise<Fail | null> {
     const blocked = isBlocked(reg.user.status) ? await explainBlocked(c.env.DB, cfg, { ok: false, status: 403, code: 'account_suspended', message: 'This account isn’t active.', userId: reg.user.id } as Fail) : null;
-    if (!blocked) await createSession(c, cfg, reg.user, method);
+    if (!blocked && !(reg.idempotent && method === 'passkey')) await createSession(c, cfg, reg.user, method);
     if (!reg.idempotent) {
       try {
         await cfg.onUserCreated({ c, user: toSessionUser(reg.user), method, identity: identity && { provider: identity.provider, email: identity.email, emailVerified: identity.emailVerified } });
@@ -166,6 +174,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     const res = await finishPasskeySignup(c.env, cfg, body.flowId, body.response, Date.now(), c);
     if (!res.ok) return fromFail(c, res);
     const blocked = await signedUp(c, res, 'passkey');
+    // A repeat of a finished signup: the account exists, sign in with the passkey.
+    if (!blocked && res.idempotent) return c.json({ ok: true, redirect: `${cfg.path('/auth/login')}?returnTo=${encodeURIComponent(cfg.afterSignInPath)}`, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id), name: res.user.username, displayName: res.user.name });
     // Created but not active yet (e.g. waiting for approval): no session; the page shows the message.
     if (blocked) return c.json({ ok: true, pending: true, code: blocked.code, message: blocked.message, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id), name: res.user.username, displayName: res.user.name });
     return c.json({ ok: true, redirect: cfg.afterSignInPath, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id), name: res.user.username, displayName: res.user.name });
@@ -218,14 +228,14 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   });
 
   r.post('/auth/api/passkeys/:id/delete', signedIn, fresh, async c => {
-    const res = await deletePasskey(c.env.DB, cfg, uid(c), c.req.param('id'), Date.now(), c.get('session')!.id);
+    const res = await deletePasskey(c.env.DB, cfg, uid(c), c.req.param('id'), Date.now(), c.get('session')!.id, c.env.PASSKEY_RP_ID);
     if (!res.ok) return fromFail(c, res);
     // The client passes these to signalAllAcceptedCredentials so password managers drop the removed passkey.
     return c.json({ ok: true, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(uid(c)), acceptedCredentialIds: await acceptedCredentialIds(c.env, uid(c)) });
   });
 
   r.post('/auth/api/identities/:id/delete', signedIn, fresh, async c => {
-    const res = await unlinkIdentity(c.env.DB, cfg, uid(c), c.req.param('id'), Date.now(), c.get('session')!.id);
+    const res = await unlinkIdentity(c.env.DB, cfg, uid(c), c.req.param('id'), Date.now(), c.get('session')!.id, c.env.PASSKEY_RP_ID);
     return res.ok ? c.json({ ok: true }) : fromFail(c, res);
   });
 
@@ -314,7 +324,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
       if (intent === 'reauth') sessionId = s.id;
     }
     const binding = randomToken(32);
-    setCookie(c, cfg.cookies.oauth, binding, { ...oauthCookie(c), maxAge: FLOW_TTL / 1000 });
+    setCookie(c, oauthName(c), binding, { ...oauthCookie(c), maxAge: FLOW_TTL / 1000 });
     return c.redirect((await startOAuth(c.env, cfg, { provider, intent, returnTo, userId, sessionId, binding, params })).toString());
   });
 
@@ -322,8 +332,8 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   const sameUser = (c: C, flowUserId: string | null) => !!flowUserId && c.get('session')?.user.id === flowUserId;
 
   async function callback(c: C, provider: Provider, p: { state?: string | null; code?: string | null; error?: string | null; appleUser?: string | null }) {
-    const binding = getCookie(c, cfg.cookies.oauth);
-    deleteCookie(c, cfg.cookies.oauth, oauthCookie(c));
+    const binding = getCookie(c, oauthName(c));
+    deleteCookie(c, oauthName(c), oauthCookie(c));
     const fin = await finishOAuth(c.env, cfg, provider, { ...p, binding });
     if (!fin.ok) {
       await noteSecurityEvent(c, cfg, { kind: 'signin-failed', code: `${provider}:${fin.code}` });
@@ -350,7 +360,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
       case 'reauthed':
         return c.redirect(safeReturnTo(cfg, out.returnTo, cfg.path('/auth/account')), 303);
       case 'signup':
-        setCookie(c, cfg.cookies.signup, out.flowId, { ...cookieBase(c), maxAge: FLOW_TTL / 1000 });
+        setCookie(c, signupName(c), out.flowId, { ...cookieBase(c), maxAge: FLOW_TTL / 1000 });
         return c.redirect(cfg.path('/auth/signup/complete'), 303);
       case 'no_account':
         return noAccountPage(c, cfg, out.provider);
@@ -385,7 +395,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   const signupExpired = (c: C) => messagePage(c, cfg, { title: COPY.signupExpiredTitle, message: 'Creating your account took too long. Please start again.', links: [{ href: cfg.path('/auth/signup'), label: 'Create an account' }] });
 
   r.get('/auth/signup/complete', async c => {
-    const flow = await getOAuthSignup(c.env.DB, getCookie(c, cfg.cookies.signup));
+    const flow = await getOAuthSignup(c.env.DB, getCookie(c, signupName(c)));
     if (!flow) return signupExpired(c);
     const { identity } = flow.data;
     const extra = await moduleHtml(cfg, m => m.html?.signupComplete?.(c, cfg, { params: flow.data.params ?? {}, identity, fields: {} }));
@@ -393,7 +403,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   });
 
   r.post('/auth/signup/complete', async c => {
-    const flowId = getCookie(c, cfg.cookies.signup);
+    const flowId = getCookie(c, signupName(c));
     const flow = await getOAuthSignup(c.env.DB, flowId);
     if (!flow) return signupExpired(c);
     const { identity } = flow.data;
@@ -415,7 +425,7 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
     if (data.ok === false) return again((data as Fail).message, (data as Fail).status === 409 ? 409 : 422);
     const res = await completeOAuthSignup(c.env, cfg, flowId, values, Date.now(), { data, c });
     if (!res.ok) return again(res.message, res.status === 409 ? 409 : 422);
-    deleteCookie(c, cfg.cookies.signup, cookieBase(c));
+    deleteCookie(c, signupName(c), cookieBase(c));
     const blocked = await signedUp(c, res, identity.provider, identity);
     if (blocked) return messagePage(c, cfg, { title: 'Account created', message: blocked.message, status: 200, links: [{ href: cfg.path('/auth/login'), label: 'Back to sign in' }] });
     return c.redirect(cfg.afterSignInPath, 303);

@@ -31,11 +31,12 @@ export async function accountView(db: D1Database, userId: string): Promise<Accou
 /**
  * Unlink Google/Apple, never the last way to sign in. In the same batch access_version advances: other sessions end,
  * this device (`keepSessionId`) moves to the new version.
+ * `rpId` (env.PASSKEY_RP_ID): only passkeys registered for this site count as a remaining way in.
  */
-export async function unlinkIdentity(db: D1Database, cfg: Pick<AuthConfig, 'audit'>, userId: string, identityId: string, at = Date.now(), keepSessionId: string | null = null): Promise<Result> {
+export async function unlinkIdentity(db: D1Database, cfg: Pick<AuthConfig, 'audit'>, userId: string, identityId: string, at = Date.now(), keepSessionId: string | null = null, rpId = ''): Promise<Result> {
   const res = await db.batch(changeAndRotateStmts(db,
     db.prepare(`DELETE FROM oauth_identities WHERE id = ?1 AND user_id = ?2
-      AND (SELECT COUNT(*) FROM passkeys WHERE user_id = ?2) + (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?2) > 1`).bind(identityId, userId),
+      AND (SELECT COUNT(*) FROM passkeys WHERE user_id = ?2 AND (?3 = '' OR rp_id = ?3)) + (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?2) > 1`).bind(identityId, userId, rpId),
     auditStmts(db, cfg, { actorId: userId, action: 'identity-unlinked', targetUserId: userId, details: { identityId } }, at, 'changes() = 1'),
     userId, keepSessionId, at));
   if (res[0]?.meta.changes === 1) return { ok: true };

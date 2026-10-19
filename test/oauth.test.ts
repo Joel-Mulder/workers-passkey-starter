@@ -148,7 +148,7 @@ describe('Google / Apple routes', () => {
 
   it('deployed: the binding cookie is SameSite=None; Secure so Apple’s form_post carries it', async () => {
     const res = await client(worker.fetch, googleEnv({ APP_ENV: 'production' }))('/auth/google/start');
-    const raw = setCookieOf(res, 'auth_oauth')!;
+    const raw = setCookieOf(res, '__Secure-auth_oauth')!; // prefixed when deployed (path /auth)
     expect(raw).toMatch(/SameSite=None/);
     expect(raw).toMatch(/Secure/);
   });

@@ -23,7 +23,8 @@ export async function hitRateLimit(db: D1Database, key: string, limit: number, w
 export const clientIp = (req: Request) => (req.headers.get('CF-Connecting-IP') ?? 'local').trim().toLowerCase().slice(0, 64);
 
 /** hmac(SESSION_SECRET, 'ratelimit', ip): the IP itself is never stored. */
-export const ipHash = (env: Pick<AuthBindings, 'SESSION_SECRET'>, req: Request) => hmac(env.SESSION_SECRET, 'ratelimit', clientIp(req));
+export const ipHash = (env: Pick<AuthBindings, 'SESSION_SECRET'>, req: Request, resolve: (req: Request) => string = clientIp) =>
+  hmac(env.SESSION_SECRET, 'ratelimit', String(resolve(req) || 'unknown').trim().toLowerCase().slice(0, 64));
 
 /** Short source code for security events (the first 16 characters of ipHash). */
 export const sourceOf = (hash: string) => hash.slice(0, 16);
@@ -31,7 +32,7 @@ export const sourceOf = (hash: string) => hash.slice(0, 16);
 /** Report a security event for the current request through cfg.onSecurityEvent. Never throws. */
 export async function noteSecurityEvent(c: AuthContext, cfg: AuthConfig, e: Omit<SecurityEvent, 'source'>): Promise<void> {
   try {
-    await cfg.onSecurityEvent({ ...e, source: sourceOf(await ipHash(c.env, c.req.raw)) }, c);
+    await cfg.onSecurityEvent({ ...e, source: sourceOf(await ipHash(c.env, c.req.raw, cfg.clientIp)) }, c);
   } catch (err) {
     logIncident('security-event', err);
   }
@@ -42,7 +43,7 @@ export async function noteSecurityEvent(c: AuthContext, cfg: AuthConfig, e: Omit
  * Retry-After seconds (the header is set and a 'throttled' event reported).
  */
 export async function flowStartLimited(c: AuthContext, cfg: AuthConfig, purpose: string): Promise<number | null> {
-  const res = await hitRateLimit(c.env.DB, `${purpose}:ip:${await ipHash(c.env, c.req.raw)}`, cfg.flowStartsPerWindow, cfg.flowStartWindowMs);
+  const res = await hitRateLimit(c.env.DB, `${purpose}:ip:${await ipHash(c.env, c.req.raw, cfg.clientIp)}`, cfg.flowStartsPerWindow, cfg.flowStartWindowMs);
   if (res.allowed) return null;
   c.header('Retry-After', String(res.retryAfterSec));
   await noteSecurityEvent(c, cfg, { kind: 'throttled', code: purpose });

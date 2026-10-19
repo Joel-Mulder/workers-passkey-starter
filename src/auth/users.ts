@@ -22,10 +22,10 @@ export async function getUser(db: D1Database, id: string): Promise<UserRow | nul
   return db.prepare('SELECT id, username, name, status, access_version, created_at, updated_at FROM users WHERE id = ?').bind(id).first<UserRow>();
 }
 
-/** Ways a user can sign in (passkeys + linked Google/Apple identities). */
-export async function signInMethodCount(db: D1Database, userId: string): Promise<{ passkeys: number; identities: number }> {
-  const r = await db.prepare('SELECT (SELECT COUNT(*) FROM passkeys WHERE user_id = ?1) AS passkeys, (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?1) AS identities')
-    .bind(userId).first<{ passkeys: number; identities: number }>();
+/** Ways a user can sign in (passkeys + linked Google/Apple identities). Pass `rpId` to count only passkeys that work on this site. */
+export async function signInMethodCount(db: D1Database, userId: string, rpId = ''): Promise<{ passkeys: number; identities: number }> {
+  const r = await db.prepare("SELECT (SELECT COUNT(*) FROM passkeys WHERE user_id = ?1 AND (?2 = '' OR rp_id = ?2)) AS passkeys, (SELECT COUNT(*) FROM oauth_identities WHERE user_id = ?1) AS identities")
+    .bind(userId, rpId).first<{ passkeys: number; identities: number }>();
   return { passkeys: r?.passkeys ?? 0, identities: r?.identities ?? 0 };
 }
 

@@ -13,7 +13,7 @@ const MSG = {
   reauth: 'Confirm it’s you and try again.',
 };
 
-type JoinRow = UserRow & { s_id: string; s_access_version: number; auth_method: AuthMethod; authenticated_at: number; s_expires_at: number };
+type JoinRow = UserRow & { s_id: string; s_access_version: number; auth_method: AuthMethod; authenticated_at: number; s_expires_at: number; s_created_at: number };
 
 export interface Resolved { session: SessionInfo | null; invalid: boolean; renewedUntil?: number }
 
@@ -23,18 +23,19 @@ export async function resolveSession(db: D1Database, cfg: AuthConfig, token: str
   if (token.length > 128) return { session: null, invalid: true };
   const id = await sha256Hex(token);
   const row = await db.prepare(
-    `SELECT s.id AS s_id, s.access_version AS s_access_version, s.auth_method, s.authenticated_at, s.expires_at AS s_expires_at,
+    `SELECT s.id AS s_id, s.access_version AS s_access_version, s.auth_method, s.authenticated_at, s.expires_at AS s_expires_at, s.created_at AS s_created_at,
             u.id, u.username, u.name, u.status, u.access_version, u.created_at, u.updated_at
      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
   ).bind(id).first<JoinRow>();
-  if (!row || row.s_expires_at <= at || isBlocked(row.status) || row.access_version !== row.s_access_version) {
+  if (!row || row.s_expires_at <= at || at - row.s_created_at >= cfg.maxSessionAgeMs || isBlocked(row.status) || row.access_version !== row.s_access_version) {
     await db.prepare('DELETE FROM sessions WHERE id = ?').bind(id).run();
     return { session: null, invalid: true };
   }
   let expiresAt = row.s_expires_at;
   let renewedUntil: number | undefined;
   if (at - (expiresAt - cfg.sessionTtlMs) > cfg.renewAfterMs) {
-    expiresAt = renewedUntil = at + cfg.sessionTtlMs;
+    // Slide, but never past the absolute lifetime.
+    expiresAt = renewedUntil = Math.min(at + cfg.sessionTtlMs, row.s_created_at + cfg.maxSessionAgeMs);
     await db.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').bind(expiresAt, id).run();
   }
   return { session: { id, user: toSessionUser(row), authMethod: row.auth_method, authenticatedAt: row.authenticated_at, expiresAt }, invalid: false, renewedUntil };
@@ -42,16 +43,24 @@ export async function resolveSession(db: D1Database, cfg: AuthConfig, token: str
 
 export const secureCookies = (c: AuthContext) => c.env.APP_ENV !== 'local';
 
+/**
+ * Cookie name with a browser-enforced prefix when deployed: `__Host-` for Path=/ (no Domain attribute allowed, so a
+ * sibling subdomain can't plant or overwrite it), `__Secure-` otherwise. Local dev over http keeps the plain name.
+ */
+export const cookieName = (c: AuthContext, base: string, path: string) =>
+  secureCookies(c) ? (path === '/' ? '__Host-' : '__Secure-') + base : base;
+const sessionCookieName = (c: AuthContext, cfg: AuthConfig) => cookieName(c, cfg.cookies.session, cfg.cookies.path);
+
 const sessionCookie = (c: AuthContext, cfg: AuthConfig, maxAgeMs: number) =>
   ({ httpOnly: true, sameSite: 'Lax' as const, path: cfg.cookies.path, secure: secureCookies(c), maxAge: Math.max(0, Math.floor(maxAgeMs / 1000)) });
 
 /** Middleware: resolve the cookie into c.var.session (null when signed out), renewing or clearing the cookie. */
 export function sessionMiddleware(cfg: AuthConfig): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
-    const token = getCookie(c, cfg.cookies.session);
+    const token = getCookie(c, sessionCookieName(c, cfg));
     const r = await resolveSession(c.env.DB, cfg, token);
-    if (r.invalid) deleteCookie(c, cfg.cookies.session, { path: cfg.cookies.path, secure: secureCookies(c) });
-    else if (r.renewedUntil && token) setCookie(c, cfg.cookies.session, token, sessionCookie(c, cfg, cfg.sessionTtlMs));
+    if (r.invalid) deleteCookie(c, sessionCookieName(c, cfg), { path: cfg.cookies.path, secure: secureCookies(c) });
+    else if (r.renewedUntil && token) setCookie(c, sessionCookieName(c, cfg), token, sessionCookie(c, cfg, r.renewedUntil - Date.now()));
     c.set('session', r.session);
     await next();
   };
@@ -69,19 +78,19 @@ export async function insertSession(db: D1Database, cfg: AuthConfig, user: UserR
 
 /** Sign in on this device: replaces this device's current session and sets the cookie. */
 export async function createSession(c: AuthContext, cfg: AuthConfig, user: UserRow, authMethod: AuthMethod): Promise<SessionInfo> {
-  const old = getCookie(c, cfg.cookies.session);
+  const old = getCookie(c, sessionCookieName(c, cfg));
   if (old && old.length <= 128) await c.env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(await sha256Hex(old)).run();
   const { token, info } = await insertSession(c.env.DB, cfg, user, authMethod);
-  setCookie(c, cfg.cookies.session, token, sessionCookie(c, cfg, cfg.sessionTtlMs));
+  setCookie(c, sessionCookieName(c, cfg), token, sessionCookie(c, cfg, cfg.sessionTtlMs));
   c.set('session', info);
   return info;
 }
 
 /** Sign out this device only. */
 export async function destroySession(c: AuthContext, cfg: AuthConfig): Promise<void> {
-  const token = getCookie(c, cfg.cookies.session);
+  const token = getCookie(c, sessionCookieName(c, cfg));
   if (token && token.length <= 128) await c.env.DB.prepare('DELETE FROM sessions WHERE id = ?').bind(await sha256Hex(token)).run();
-  deleteCookie(c, cfg.cookies.session, { path: cfg.cookies.path, secure: secureCookies(c) });
+  deleteCookie(c, sessionCookieName(c, cfg), { path: cfg.cookies.path, secure: secureCookies(c) });
   c.set('session', null);
 }
 

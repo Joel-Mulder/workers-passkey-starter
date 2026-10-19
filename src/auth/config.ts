@@ -1,5 +1,6 @@
 // AuthOptions with defaults filled in. Every module takes the resolved config explicitly; nothing is global.
 import type { AuthModule } from './extensions';
+import { clientIp } from './rate-limit';
 import type { AuthOptions, AuthContext, PageInput, SecurityEvent } from './types';
 
 const MINUTE = 60_000;
@@ -13,9 +14,11 @@ export interface AuthConfig {
   afterSignInPath: string;
   sessionTtlMs: number;
   renewAfterMs: number;
+  maxSessionAgeMs: number;
   freshAuthMs: number;
   flowStartsPerWindow: number;
   flowStartWindowMs: number;
+  clientIp: (req: Request) => string;
   audit: boolean;
   allowSignup: NonNullable<AuthOptions['allowSignup']>;
   onUserCreated: NonNullable<AuthOptions['onUserCreated']>;
@@ -45,9 +48,11 @@ export function resolveConfig(o: AuthOptions): AuthConfig {
     afterSignInPath: path(o.afterSignInPath ?? '/'),
     sessionTtlMs: o.sessionTtlMs ?? 30 * DAY,
     renewAfterMs: o.renewAfterMs ?? DAY,
+    maxSessionAgeMs: o.maxSessionAgeMs ?? 90 * DAY,
     freshAuthMs: o.freshAuthMs ?? 5 * MINUTE,
     flowStartsPerWindow: o.flowStartsPerWindow ?? 60,
     flowStartWindowMs: o.flowStartWindowMs ?? 10 * MINUTE,
+    clientIp: o.clientIp ?? clientIp,
     audit: o.audit ?? true,
     allowSignup: o.allowSignup ?? (() => true),
     onUserCreated: o.onUserCreated ?? (() => {}),

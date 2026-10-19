@@ -1,0 +1,37 @@
+// Template. Replace every <PLACEHOLDER>; secrets are listed at the bottom and are set with `wrangler secret put`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "workers-passkey-starter", // rename to your Worker
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-05",
+  "compatibility_flags": ["nodejs_compat"],
+  // Minified: about 445 KiB (130 KiB gzip) for this example. Source maps keep stack traces readable.
+  "minify": true,
+  "upload_source_maps": true,
+  // public/auth/passkey.js and public/auth/auth.css. Assets are served first; everything else reaches the Worker.
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  // Invocation logs record every request URL; keep them off if you add tokens to URLs (magic links, invites).
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } },
+  "vars": {
+    // 'local' only for `wrangler dev` over http. Deployed: anything else (e.g. 'production').
+    "APP_ENV": "production",
+    // Exactly what the browser shows in the address bar, without a trailing slash.
+    "APP_ORIGIN": "https://<YOUR_DOMAIN>",
+    // The host of APP_ORIGIN, or a registrable parent of it (example.com for app.example.com). Passkeys are bound to
+    // it: changing it later makes every existing passkey unusable.
+    "PASSKEY_RP_ID": "<YOUR_DOMAIN>"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "<D1_DATABASE_NAME>", "database_id": "<D1_DATABASE_ID>", "migrations_dir": "migrations" }
+  ],
+  // Daily cleanup of expired sessions, flows and rate counters (src/index.ts → scheduled).
+  "triggers": { "crons": ["17 3 * * *"] }
+  // Secrets (wrangler secret put <NAME>; locally in .dev.vars):
+  //   SESSION_SECRET        required: at least 32 random characters (openssl rand -base64 48)
+  //   GOOGLE_CLIENT_ID      optional: Google sign-in is on once both Google values are set
+  //   GOOGLE_CLIENT_SECRET
+  //   APPLE_CLIENT_ID       optional: the Services ID; Apple sign-in is on once all four Apple values are set
+  //   APPLE_TEAM_ID
+  //   APPLE_KEY_ID
+  //   APPLE_PRIVATE_KEY     the .p8 file's contents
+}

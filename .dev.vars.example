@@ -1,0 +1,14 @@
+# Copy to .dev.vars for `wrangler dev` (git-ignored). Local development runs over http on localhost.
+APP_ENV=local
+APP_ORIGIN=http://localhost:8787
+PASSKEY_RP_ID=localhost
+SESSION_SECRET=replace-with-at-least-32-random-characters
+
+# Optional. Google allows http://localhost redirect URIs for testing; Apple needs a real https domain.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+APPLE_CLIENT_ID=
+APPLE_TEAM_ID=
+APPLE_KEY_ID=
+# The .p8 contents on one line with \n for the line breaks, in double quotes.
+APPLE_PRIVATE_KEY=

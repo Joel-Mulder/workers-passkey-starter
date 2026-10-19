@@ -2,7 +2,7 @@
 // Workers keep no memory between requests, so every step is stored in D1; flows are single use and expire.
 import { randomToken } from './crypto';
 
-export type FlowKind = 'passkey-register' | 'passkey-login' | 'reauth' | 'signup' | 'oauth' | 'oauth-resume';
+export type FlowKind = 'passkey-register' | 'passkey-login' | 'reauth' | 'signup' | 'oauth' | 'oauth-resume' | 'recovery';
 export const FLOW_TTL = 10 * 60_000;
 const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 

@@ -5,13 +5,16 @@ Sign-in for a [Hono](https://hono.dev) app on Cloudflare Workers:
 - **Passkeys:** usernameless sign-in, signup with username + display name, add / rename / remove passkeys, step-up ("confirm it's you") for sensitive actions.
 - **Sign in with Google and Apple:** OpenID Connect, with linking and unlinking.
 - **Sessions:** database sessions with instant revocation and "sign out everywhere".
+- **Account lifecycle:** self-service account deletion, and recovery through a one-time link for someone who lost every passkey.
 - **Hardening:** CSRF origin check, rate limits, security headers and an audit log.
 
 **D1 is the only store.** No auth framework, no KV, no Durable Objects, no in-memory state.
 
 The code is extracted from a production app. Project-specific parts were removed (invites, admin approval, e-mail verification). They are now hooks.
 
-Contents: [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
+MIT licensed (see [LICENSE](LICENSE)).
+
+Contents: [Quick start](#quick-start) · [How it works](#how-it-works) · [Integrate into an existing app](#integrate-into-an-existing-app) · [Configuration](#configuration) · [Google setup](#google-setup) · [Apple setup](#apple-setup) · [RP ID and origin pitfalls](#rp-id-and-origin-pitfalls) · [Why it fits Worker limits](#why-it-fits-worker-limits) · [Account deletion and recovery](#account-deletion-and-recovery) · [Routes](#routes) · [Instructions for coding agents](#instructions-for-coding-agents)
 
 ## Quick start
 
@@ -32,7 +35,7 @@ Run the checks:
 npm run check
 ```
 
-That is the typecheck plus 74 tests. They use an in-memory D1 and stub only the signature checks.
+That is the typecheck plus 85 tests. They use an in-memory D1 and stub only the signature checks.
 
 ## How it works
 
@@ -172,7 +175,7 @@ You need a Hono app on Workers with a D1 binding. Six steps:
 4. **Configure.** Set the vars and secrets ([Configuration](#configuration)). Run the migration with `wrangler d1 migrations apply DB --remote`. Add the cron trigger.
 5. **Use your own UI (optional).** Keep the built-in pages, wrap them in your layout with `renderPage`, or build your own and import the client functions:
    ```js
-   import { signInWithPasskey, signUpWithPasskey, addPasskey, reauthenticate, withFreshAuth, postJson } from '/auth/passkey.js';
+   import { signInWithPasskey, signUpWithPasskey, addPasskey, deleteAccount, recoverWithPasskey, reauthenticate, withFreshAuth, postJson } from '/auth/passkey.js';
    const { redirect } = await signInWithPasskey({ returnTo: '/dashboard' });
    ```
    For an SPA, `GET /auth/api/me` returns the signed-in user or 401, and `GET /auth/api/account` lists passkeys and linked accounts.
@@ -235,7 +238,7 @@ createAuth({
 | `freshAuthMs` | 5 min | Step-up window |
 | `flowStartsPerWindow` / `flowStartWindowMs` | 60 / 10 min | Per-IP rate limit for unauthenticated flow starts |
 | `audit` | `true` | Write `audit_log` rows |
-| `allowSignup`, `onUserCreated`, `onSecurityEvent`, `renderPage` | | Hooks, see above and `src/auth/types.ts` |
+| `allowSignup`, `onUserCreated`, `onUserDeleted`, `onSecurityEvent`, `renderPage` | | Hooks, see above and `src/auth/types.ts` |
 | `securityHeaders.csp` | | Extra CSP sources, e.g. `{ 'img-src': ['https://cdn.example.com'] }` |
 | `maxBodyBytes` | 256 KB | Body limit |
 
@@ -278,11 +281,35 @@ This needs a paid Apple Developer account, and the callback must be https on a r
 
 - **CPU.** The expensive work runs on the runtime's native Web Crypto, not in JavaScript: ES256/RS256 signature checks, the ID-token check and Apple's client-secret signing. So very little JavaScript CPU time is spent per sign-in. Waiting on D1 or Google/Apple is I/O, which doesn't count towards CPU time. No password hashing (PBKDF2, bcrypt) is involved anywhere.
 - **Bundle.** Only small, Worker-friendly libraries; no Node-only JWT or crypto polyfills, no client SDK in the server bundle.
-  - This example measured with `npm run size` (`wrangler deploy --dry-run`, `minify: true`): **445 KiB / 130 KiB gzip** (unminified: 896 / 176 KiB).
+  - This example measured with `npm run size` (`wrangler deploy --dry-run`, `minify: true`): **451 KiB / 131 KiB gzip** (unminified: about 0.9 MiB / 180 KiB).
   - The free plan allows 3 MB gzip.
   - The largest part is `@simplewebauthn/server` and its ASN.1/X.509 dependencies. It needs them for attestation formats; this kit uses `attestationType: 'none'`.
 - **No in-memory state.** Challenges, OAuth state, sessions and rate counters all live in D1, so any isolate can serve any step of a ceremony. Module-level variables (a common cause of "works locally, fails deployed") hold nothing but configuration and the JWKS cache.
 - **Subrequests.** Sign-in with Google/Apple uses at most two: the token endpoint and the JWKS, which `jose` caches per isolate. Passkey ceremonies use none.
+
+## Account deletion and recovery
+
+**Deleting your own account** (`/auth/account` → "Delete account", or `POST /auth/api/account/delete`):
+
+- Needs step-up, and the exact username typed as confirmation.
+- Deletes the `users` row. Passkeys, linked accounts, sessions and recovery links go with it (`ON DELETE CASCADE`); pending flows are deleted explicitly. The `audit_log` row (`account-deleted`) is kept.
+- Clears this device's cookie. The client calls `signalAllAcceptedCredentials` with an empty list, so password managers drop the passkeys.
+- `onUserDeleted({ c, userId, username })` runs afterwards. Clean up your own data there, or give your tables `REFERENCES users(id) ON DELETE CASCADE`. A foreign key without a cascade makes the delete fail.
+
+**Recovery** for someone who lost every passkey (and has no linked Google/Apple account to sign in with). The kit has no admin screens and sends no mail, so issuing the link is up to your code:
+
+```ts
+// Only after you have verified who is asking (a support check, a mail to a verified address, an admin action):
+const res = await auth.issueRecoveryLink(env, userId); // { ok: true, url, expiresAt } or { ok: false, code, message }
+if (res.ok) await sendMail(to, `Recover your account: ${res.url}`); // your mailer
+```
+
+- The link is `<APP_ORIGIN><basePath>/auth/recover/<token>`. It is valid for 15 minutes and works once; a new link replaces older unused ones. Only the SHA-256 of the token is stored, and the page sends `Referrer-Policy: no-referrer`.
+- Opening it lets the user create **one new passkey**. That passkey replaces every other passkey, ends every session, unlinks Google/Apple and removes pending flows and other recovery links, all in one D1 batch. Whoever had access before keeps nothing.
+- Each write in that batch is conditional on this ceremony having consumed the token (`used_by_flow`), so two ceremonies racing on one link can't both succeed.
+- Limits: 60 ceremony starts per 10 minutes per IP, and 10 per link.
+- Suspended accounts can't be recovered, and you can't issue a link for them.
+- Treat a recovery URL like a password: whoever opens it first takes over the account.
 
 ## Routes
 
@@ -311,6 +338,14 @@ All paths are relative to `basePath`. Pages live under `/auth/*` and JSON under 
 | POST | `/auth/api/passkeys/:id/rename`, `/auth/api/passkeys/:id/delete` | Manage passkeys |
 | POST | `/auth/api/identities/:id/delete` | Unlink Google/Apple |
 | POST | `/auth/api/sign-out-everywhere` | End every other session |
+| POST | `/auth/api/account/delete` | Delete the account (`{ username }` to confirm) |
+
+**Recovery**
+
+| Method | Path | |
+|---|---|---|
+| GET | `/auth/recover/:token` | The page a recovery link opens |
+| POST | `/auth/api/recovery/options`, `…/verify` | Register the replacement passkey |
 
 **Read-only JSON**
 
@@ -334,14 +369,13 @@ Errors are JSON `{ error: { code, message } }`. Clients branch on `code`: `reaut
 These are hooks or places to extend; each is a small addition:
 
 - E-mail on the account and e-mail verification: use `onUserCreated`, plus your own table.
-- Account deletion: delete the `users` row. Passkeys, identities and sessions cascade.
 - Admin screens and suspending users: set `status = 'suspended'`, then call `auth.revokeAllSessions`.
-- Recovery when someone loses every passkey: an admin-issued one-time link that registers a new passkey.
+- Deciding who gets a recovery link, and delivering it: call `auth.issueRecoveryLink` from your admin or support flow.
 - Passkey autofill (conditional UI, `mediation: 'conditional'`).
 
 ## Instructions for coding agents
 
-- **Read first:** `src/auth/index.ts` (the public surface), then `src/auth/routes.ts`. The services (`passkeys.ts`, `oauth.ts`, `registration.ts`, `session.ts`, `account.ts`) are plain functions over D1 and are unit-tested in `test/`.
+- **Read first:** `src/auth/index.ts` (the public surface), then `src/auth/routes.ts`. The services (`passkeys.ts`, `oauth.ts`, `registration.ts`, `session.ts`, `account.ts`, `recovery.ts`) are plain functions over D1 and are unit-tested in `test/`.
 - **Integrating:** follow [Integrate into an existing app](#integrate-into-an-existing-app) step by step.
   - Don't change the middleware order.
   - Don't mount `auth.routes` behind your own auth middleware.
@@ -355,6 +389,8 @@ These are hooks or places to extend; each is a small addition:
   - Writes need `Origin === APP_ORIGIN` (Apple's callback excepted).
   - Raw IPs are never stored.
   - Error messages are never logged (`logIncident`).
+  - Recovery tokens are stored hashed, expire, work once, and every write of a recovery is guarded by `used_by_flow`.
+  - Never expose `issueRecoveryLink` on an unauthenticated route: it hands over the account.
 - **Don't add:**
   - `@simplewebauthn/browser`;
   - Node crypto polyfills or bcrypt/scrypt;

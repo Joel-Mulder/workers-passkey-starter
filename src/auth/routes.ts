@@ -2,16 +2,17 @@
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AuthConfig } from './config';
-import { accountView, signOutOtherSessions, unlinkIdentity } from './account';
+import { accountView, deleteOwnAccount, signOutOtherSessions, unlinkIdentity } from './account';
 import { randomToken } from './crypto';
 import { createFlow, FLOW_TTL, takeFlow } from './flows';
 import { jsonError, logIncident, readJson, safeReturnTo } from './http';
 import { finishOAuth, INTENTS, MSG as OAUTH_MSG, oauthProvidersEnabled, PROVIDERS, resolveOAuth, startOAuth, type Intent, type OAuthFlow } from './oauth';
-import { accountPage, loginPage, messagePage, noAccountPage, signupCompletePage, signupPage } from './pages';
+import { accountPage, loginPage, messagePage, noAccountPage, recoverPage, signupCompletePage, signupPage } from './pages';
 import {
   acceptedCredentialIds, deletePasskey, finishAddPasskey, finishLogin, finishReauth, renamePasskey, startAddPasskey, startLogin, startReauth, userHandleB64,
 } from './passkeys';
 import { flowStartLimited, noteSecurityEvent } from './rate-limit';
+import { finishRecovery, inspectRecovery, startRecovery } from './recovery';
 import { completeOAuthSignup, finishPasskeySignup, getOAuthSignup, peekPasskeySignup, startPasskeySignup, type OAuthIdentity, type Registered } from './registration';
 import { createSession, destroySession, isFresh, markFreshAuth, requireFreshAuth, requireUser, secureCookies } from './session';
 import { getUser, toSessionUser, type Fail } from './users';
@@ -214,6 +215,51 @@ export function authRoutes(cfg: AuthConfig): Hono<AuthEnv> {
   r.post('/auth/api/sign-out-everywhere', signedIn, fresh, async c => {
     const res = await signOutOtherSessions(c.env.DB, cfg, uid(c), c.get('session')!.id);
     return c.json({ ok: true, revoked: res.revoked });
+  });
+
+  r.post('/auth/api/account/delete', signedIn, fresh, async c => {
+    const body = await readJson<{ username?: unknown }>(c);
+    if (!body) return badRequest(c);
+    const s = c.get('session')!;
+    const res = await deleteOwnAccount(c.env.DB, cfg, s.user.id, body.username);
+    if (!res.ok) return fromFail(c, res);
+    await destroySession(c, cfg);
+    try {
+      await cfg.onUserDeleted({ c, userId: s.user.id, username: s.user.username });
+    } catch (e) {
+      logIncident('onUserDeleted', e);
+    }
+    // The client passes rpId/userId with an empty list to signalAllAcceptedCredentials: password managers drop the passkeys.
+    return c.json({ ok: true, redirect: cfg.afterSignInPath, rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(s.user.id) });
+  });
+
+  // ───────────── Recovery (one-time link from issueRecoveryLink) ─────────────
+
+  r.get('/auth/recover/:token', async c => {
+    const res = await inspectRecovery(c.env.DB, c.req.param('token'));
+    return recoverPage(c, cfg, { token: c.req.param('token'), username: res.ok ? res.user.username : null });
+  });
+
+  r.post('/auth/api/recovery/options', async c => {
+    if (await flowStartLimited(c, cfg, 'recovery')) return jsonError(c, 429, 'rate_limited', COPY.rateLimited);
+    const body = await readJson<{ token?: unknown }>(c);
+    const res = await startRecovery(c.env, cfg, body?.token);
+    return res.ok ? c.json({ flowId: res.flowId, options: res.options }) : fromFail(c, res);
+  });
+
+  r.post('/auth/api/recovery/verify', async c => {
+    const body = await readJson<{ flowId?: string; response?: unknown }>(c);
+    if (!body) return badRequest(c);
+    const res = await finishRecovery(c.env, cfg, body.flowId, body.response);
+    if (!res.ok) {
+      await noteSecurityEvent(c, cfg, { kind: res.code === 'account_suspended' ? 'signin-blocked' : 'signin-failed', code: `recovery:${res.code}` });
+      return fromFail(c, res);
+    }
+    await createSession(c, cfg, res.user, 'passkey');
+    return c.json({
+      ok: true, redirect: cfg.path('/auth/account'), rpId: c.env.PASSKEY_RP_ID, userId: userHandleB64(res.user.id),
+      acceptedCredentialIds: await acceptedCredentialIds(c.env, res.user.id), name: res.user.username, displayName: res.user.name,
+    });
   });
 
   // ───────────── Google / Apple ─────────────

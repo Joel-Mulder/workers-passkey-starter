@@ -69,6 +69,19 @@ CREATE TABLE auth_flows (
 );
 CREATE INDEX auth_flows_expires ON auth_flows (expires_at);
 
+-- One-time recovery links (issueRecoveryLink): only the SHA-256 of the token is stored. Finishing one replaces every
+-- passkey, ends every session and unlinks Google/Apple.
+CREATE TABLE recovery_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  used_by_flow TEXT,                         -- the auth_flows id that consumed it (proof of ownership in the batch)
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX recovery_tokens_user ON recovery_tokens (user_id);
+
 -- Fixed-window rate-limit counters. Keys hold an HMAC of the client IP, never the IP itself.
 CREATE TABLE rate_counters (
   key TEXT NOT NULL,

@@ -9,6 +9,7 @@ body { margin: 0; font: 16px/1.5 system-ui, sans-serif; }
 .auth input { box-sizing: border-box; width: 100%; padding: .6rem .7rem; font: inherit; border: 1px solid var(--auth-line); border-radius: .5rem; background: transparent; color: inherit; }
 .auth-button { display: inline-block; margin: .75rem .5rem 0 0; padding: .6rem 1rem; font: inherit; color: inherit; text-decoration: none; border: 1px solid var(--auth-line); border-radius: .5rem; background: transparent; cursor: pointer; }
 .auth-button--primary { background: var(--auth-accent); border-color: var(--auth-accent); color: #fff; }
+.auth-button--danger { border-color: #c62828; color: #c62828; }
 .auth-button:disabled { opacity: .5; cursor: default; }
 .auth-providers, .auth-list { list-style: none; margin: 0; padding: 0; }
 .auth-list li { display: flex; gap: 1rem; justify-content: space-between; align-items: center; padding: .6rem 0; border-bottom: 1px solid var(--auth-line); }

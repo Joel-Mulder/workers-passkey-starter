@@ -4,7 +4,7 @@
 // Use it two ways:
 //   1. Load it on the example pages (src/auth/pages.ts): it wires every [data-passkey-*] element automatically.
 //   2. Import the functions in your own UI:
-//        import { signInWithPasskey, signUpWithPasskey, reauthenticate, postJson } from '/auth/passkey.js';
+//        import { signInWithPasskey, signUpWithPasskey, reauthenticate, deleteAccount, recoverWithPasskey, postJson } from '/auth/passkey.js';
 //
 // The API lives next to this file: '/auth/passkey.js' → '/auth/api/…' (also under a basePath).
 
@@ -30,6 +30,9 @@ const MSG = {
   signOutConfirm: 'Sign out on all your other devices?',
   signedOut: n => `Signed out on ${n} other ${n === 1 ? 'device' : 'devices'}.`,
   makePasskey: 'Create passkey',
+  usernameMismatch: 'This doesn’t match your username.',
+  deleteConfirm: 'Delete your account for good?',
+  recovered: 'Done. Your new passkey works; you’re signed in.',
 };
 
 // ───────────── base64url + WebAuthn JSON ─────────────
@@ -182,6 +185,23 @@ export async function addPasskey() {
   const response = await createPasskey(options);
   const out = await postJson('/passkeys/verify', { flowId, response });
   await signalAccepted(out.rpId, out.userId, out.acceptedCredentialIds);
+  return out;
+}
+
+/** Delete the signed-in account (needs fresh auth; the server checks `username`). Password managers drop its passkeys. */
+export async function deleteAccount(username) {
+  const out = await postJson('/account/delete', { username });
+  await signalAccepted(out.rpId, out.userId, []);
+  return out;
+}
+
+/** Finish a recovery link: create the new passkey that replaces all others. Resolves { redirect, … } once signed in. */
+export async function recoverWithPasskey(token) {
+  const { flowId, options } = await postJson('/recovery/options', { token });
+  const response = await createPasskey(options);
+  const out = await postJson('/recovery/verify', { flowId, response });
+  await signalAccepted(out.rpId, out.userId, out.acceptedCredentialIds); // the old passkeys disappear from password managers
+  await signalDetails(out.rpId, out.userId, out.name, out.displayName);
   return out;
 }
 
@@ -416,10 +436,47 @@ function initAccount(root) {
   if (new URLSearchParams(location.search).get('reauth') === '1') reauthenticate().then(ok => { if (ok) root.dataset.fresh = 'true'; });
 }
 
+function initDelete(form) {
+  const button = form.querySelector('[type=submit]');
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const typed = String(form.elements.namedItem('username')?.value ?? '').trim().toLowerCase();
+    if (typed !== form.dataset.username) { say(form.closest('[data-account]') ?? form, MSG.usernameMismatch); return; }
+    if (!confirm(MSG.deleteConfirm)) return;
+    const root = form.closest('[data-account]') ?? form;
+    busy(button, true);
+    try {
+      let out = null;
+      if (await withFreshAuth(async () => { out = await deleteAccount(typed); }, { label: button.textContent.trim(), onMessage: m => say(root, m) })) location.assign(out.redirect);
+    } catch (err) { say(root, errorMessage(err)); } finally { busy(button, false); }
+  });
+}
+
+function initRecover(button) {
+  const root = button.closest('[data-passkey-recover-root]') ?? document.body;
+  if (!isSupported()) { busy(button, true); say(root, MSG.unsupported); return; }
+  button.addEventListener('click', async () => {
+    busy(button, true);
+    say(root, MSG.waiting);
+    try {
+      const out = await recoverWithPasskey(button.dataset.token);
+      say(root, MSG.recovered);
+      location.assign(out.redirect);
+    } catch (err) {
+      say(root, errorMessage(err));
+      if (err?.code === 'recovery_invalid') button.hidden = true;
+    } finally {
+      busy(button, false);
+    }
+  });
+}
+
 function init() {
   document.querySelectorAll('form[data-passkey-login]').forEach(initLogin);
   document.querySelectorAll('form[data-passkey-signup]').forEach(initSignup);
   document.querySelectorAll('[data-account]').forEach(initAccount);
+  document.querySelectorAll('form[data-account-delete]').forEach(initDelete);
+  document.querySelectorAll('[data-passkey-recover]').forEach(initRecover);
 }
 
 if (typeof document !== 'undefined') {

@@ -5,7 +5,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-05",
   "compatibility_flags": ["nodejs_compat"],
-  // Minified: about 445 KiB (130 KiB gzip) for this example. Source maps keep stack traces readable.
+  // Minified: about 450 KiB (130 KiB gzip) for this example. Source maps keep stack traces readable.
   "minify": true,
   "upload_source_maps": true,
   // public/auth/passkey.js and public/auth/auth.css. Assets are served first; everything else reaches the Worker.

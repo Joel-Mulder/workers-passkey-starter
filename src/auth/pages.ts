@@ -125,9 +125,33 @@ export function accountPage(c: AuthContext, cfg: AuthConfig, v: AccountView, o: 
 
   <h2>Sessions</h2>
   <button type="button" class="auth-button" data-sign-out-everywhere>Sign out on all other devices</button>
+
+  <h2>Delete account</h2>
+  <form data-account-delete data-username="${v.user.username}">
+    <p>This deletes your account and signs you out everywhere. It can’t be undone.</p>
+    <label for="delete-username">Type your username (${v.user.username}) to confirm</label>
+    <input id="delete-username" name="username" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+    <button class="auth-button auth-button--danger" type="submit">Delete my account</button>
+  </form>
 </section>
 <form method="post" action="${cfg.path('/auth/logout')}"><button class="auth-button" type="submit">Sign out</button></form>`;
   return renderPage(c, cfg, { title: 'Sign-in methods', body: body.value, scripts: [cfg.path('/auth/passkey.js')] });
+}
+
+export function recoverPage(c: AuthContext, cfg: AuthConfig, o: { token: string; username: string | null }) {
+  const body = o.username
+    ? html`<h1>Recover your account</h1>
+<section data-passkey-recover-root>
+  <p>Create a new passkey for <strong>${o.username}</strong>. It replaces all your current passkeys, signs you out
+  everywhere and unlinks Google/Apple (you can link them again afterwards).</p>
+  <button type="button" class="auth-button auth-button--primary" data-passkey-recover data-token="${o.token}">Create a new passkey</button>
+  ${statusRegion}
+</section>`
+    : html`<h1>Recover your account</h1><p>This recovery link is incorrect, has already been used or has expired. Ask for a new link.</p>
+<p><a href="${cfg.path('/auth/login')}">Sign in</a></p>`;
+  // The token is in the URL: never send it to other sites.
+  c.header('Referrer-Policy', 'no-referrer');
+  return renderPage(c, cfg, { title: 'Recover your account', body: body.value, scripts: o.username ? [cfg.path('/auth/passkey.js')] : [], status: o.username ? 200 : 400 });
 }
 
 export function messagePage(c: AuthContext, cfg: AuthConfig, o: { title: string; message: string; status?: number; links?: { href: string; label: string }[] }) {

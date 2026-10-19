@@ -8,6 +8,8 @@ import type { Provider, SessionUser } from './types';
 export const MSG = {
   lastMethod: 'You can’t remove your last way to sign in. Add a passkey first.',
   notFound: 'This link doesn’t exist (any more).',
+  confirm: 'Type your username exactly to confirm.',
+  gone: 'This account doesn’t exist (any more).',
 };
 
 export interface IdentityView { id: string; provider: Provider; email: string | null; createdAt: number; lastUsedAt: number | null }
@@ -50,11 +52,29 @@ export async function signOutOtherSessions(db: D1Database, cfg: Pick<AuthConfig,
   return { revoked: res[2]?.meta.changes ?? 0 };
 }
 
+/**
+ * Delete the user's own account (the route requires fresh auth): the exact username must be typed. Deletes the users
+ * row; passkeys, linked accounts, sessions and recovery links go with it (ON DELETE CASCADE), pending flows
+ * explicitly. The audit row is kept. Your own tables: give them ON DELETE CASCADE, or clean up in onUserDeleted.
+ */
+export async function deleteOwnAccount(db: D1Database, cfg: Pick<AuthConfig, 'audit'>, userId: string, confirmUsername: unknown, at = Date.now()): Promise<Result> {
+  const u = await getUser(db, userId);
+  if (!u) return fail(404, 'not_found', MSG.gone);
+  if (typeof confirmUsername !== 'string' || confirmUsername.trim().toLowerCase() !== u.username) return fail(422, 'confirm_mismatch', MSG.confirm);
+  const res = await db.batch([
+    ...auditStmts(db, cfg, { actorId: userId, action: 'account-deleted', targetUserId: userId }, at),
+    db.prepare('DELETE FROM auth_flows WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM users WHERE id = ? AND username = ?').bind(userId, u.username),
+  ]);
+  return res.at(-1)?.meta.changes === 1 ? { ok: true } : fail(404, 'not_found', MSG.gone);
+}
+
 /** Housekeeping for a cron trigger: expired sessions, flows and rate counters. */
 export async function cleanupExpired(db: D1Database, at = Date.now()): Promise<void> {
   await db.batch([
     db.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(at),
     db.prepare('DELETE FROM auth_flows WHERE expires_at <= ?').bind(at),
     db.prepare('DELETE FROM rate_counters WHERE expires_at <= ?').bind(at),
+    db.prepare('DELETE FROM recovery_tokens WHERE expires_at <= ?').bind(at - 30 * 24 * 60 * 60_000),
   ]);
 }

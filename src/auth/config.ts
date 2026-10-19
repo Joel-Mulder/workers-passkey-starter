@@ -17,6 +17,7 @@ export interface AuthConfig {
   audit: boolean;
   allowSignup: NonNullable<AuthOptions['allowSignup']>;
   onUserCreated: NonNullable<AuthOptions['onUserCreated']>;
+  onUserDeleted: NonNullable<AuthOptions['onUserDeleted']>;
   onSecurityEvent: NonNullable<AuthOptions['onSecurityEvent']>;
   renderPage: ((c: AuthContext, page: PageInput) => Response | Promise<Response>) | null;
   /** Absolute path under basePath, e.g. path('/auth/login') → '/app/auth/login'. */
@@ -44,6 +45,7 @@ export function resolveConfig(o: AuthOptions): AuthConfig {
     audit: o.audit ?? true,
     allowSignup: o.allowSignup ?? (() => true),
     onUserCreated: o.onUserCreated ?? (() => {}),
+    onUserDeleted: o.onUserDeleted ?? (() => {}),
     onSecurityEvent: o.onSecurityEvent ?? defaultSecurityEvent,
     renderPage: o.renderPage ?? null,
     path,

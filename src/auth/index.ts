@@ -7,11 +7,12 @@
 //
 // See README.md for the full integration guide.
 import { cleanupExpired } from './account';
+import { issueRecoveryLink } from './recovery';
 import { resolveConfig, type AuthConfig } from './config';
 import { authRoutes } from './routes';
 import { bodyLimitGuard, originCheck, securityHeaders, type SecurityHeaderOptions } from './security';
 import { requireFreshAuth, requireUser, revokeAllSessions, sessionMiddleware } from './session';
-import type { AuthOptions } from './types';
+import type { AuthBindings, AuthOptions } from './types';
 
 export function createAuth(options: AuthOptions & { securityHeaders?: SecurityHeaderOptions; maxBodyBytes?: number }) {
   const cfg: AuthConfig = resolveConfig(options);
@@ -35,6 +36,13 @@ export function createAuth(options: AuthOptions & { securityHeaders?: SecurityHe
     revokeAllSessions,
     /** For a cron trigger: delete expired sessions, ceremony flows and rate counters. */
     cleanup: cleanupExpired,
+    /**
+     * A one-time recovery URL (15 minutes) for someone who lost every passkey. Verify who is asking first; then send
+     * the URL to them yourself (mail, support chat). Opening it lets them register one new passkey, which replaces
+     * all passkeys, ends all sessions and unlinks Google/Apple.
+     */
+    issueRecoveryLink: (env: Pick<AuthBindings, 'DB' | 'APP_ORIGIN' | 'PASSKEY_RP_ID'>, userId: string, o?: { ttlMs?: number; actorId?: string | null }) =>
+      issueRecoveryLink(env, cfg, userId, o),
   };
 }
 

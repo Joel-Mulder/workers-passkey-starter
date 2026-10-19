@@ -106,6 +106,11 @@ export interface AuthOptions {
   allowSignup?: (req: SignupRequest) => boolean | string | Promise<boolean | string>;
   /** After an account was created (e.g. send a welcome or e-mail verification mail; c.executionCtx.waitUntil for slow work). */
   onUserCreated?: (e: NewUserEvent) => void | Promise<void>;
+  /**
+   * After a user deleted their own account (the users row is gone). Clean up your own data here unless your tables
+   * reference users(id) with ON DELETE CASCADE. Must not throw.
+   */
+  onUserDeleted?: (e: { c: AuthContext; userId: string; username: string }) => void | Promise<void>;
   /** Failed sign-ins, throttling, blocked cross-origin writes. Default: one JSON line via console.warn. Must not throw. */
   onSecurityEvent?: (e: SecurityEvent, c: AuthContext) => void | Promise<void>;
   /** Wrap the built-in pages in your own layout. Default: a minimal unstyled HTML document. */
